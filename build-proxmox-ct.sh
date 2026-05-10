@@ -53,6 +53,29 @@ PROJECT_DIR="$(pwd)"          # may be on /mnt/d – that's fine for source file
 # via the environment for users who want a known, reusable path.
 BUILD_BASE="${BUILD_BASE:-/tmp/proxmox-ct-build-${OUTPUT_NAME}-${TARGETARCH}}"
 ROOTFS="${BUILD_BASE}/rootfs"
+
+# Safety net: BUILD_BASE feeds rm -rf in the cleanup trap, the rebuild flow,
+# and (indirectly) the rootfs build. Refuse obviously dangerous values up
+# front so a stray BUILD_BASE=/ or BUILD_BASE='' can never `rm -rf` the host.
+case "$BUILD_BASE" in
+  ""|/|//|/.*|.|./*|../*) echo "[ERROR] Refusing dangerous BUILD_BASE='${BUILD_BASE}'." >&2; exit 1 ;;
+esac
+# Require an absolute, non-trivial path; default to /tmp unless the caller
+# explicitly opts out via I_KNOW_WHAT_IM_DOING=1.
+if [[ "${BUILD_BASE}" != /* ]]; then
+  echo "[ERROR] BUILD_BASE must be an absolute path (got: '${BUILD_BASE}')." >&2
+  exit 1
+fi
+if (( ${#BUILD_BASE} < 6 )); then
+  echo "[ERROR] BUILD_BASE='${BUILD_BASE}' is too short — refusing for safety." >&2
+  exit 1
+fi
+if [[ "${BUILD_BASE}" != /tmp/* && "${I_KNOW_WHAT_IM_DOING:-0}" != "1" ]]; then
+  echo "[ERROR] BUILD_BASE='${BUILD_BASE}' is outside /tmp." >&2
+  echo "        Re-run with I_KNOW_WHAT_IM_DOING=1 to use a non-/tmp path." >&2
+  exit 1
+fi
+
 mkdir -p "$BUILD_BASE"
 
 DOTNET_CHANNEL="10.0"
