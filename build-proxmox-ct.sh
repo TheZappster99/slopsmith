@@ -40,9 +40,12 @@ DOTNET_CHANNEL="10.0"
 VGMSTREAM_URL="https://github.com/vgmstream/vgmstream/releases/download/r2083/vgmstream-linux-cli.zip"
 # Supply-chain hashes — regenerate with:
 #   curl -fsSL <URL> | sha256sum
-# Leave empty and set SKIP_HASH_CHECK=1 to explicitly opt into unverified downloads.
-VGMSTREAM_SHA256=""  # TODO: pin on first verified download
-DOTNET_INSTALL_SHA256=""  # TODO: pin; changes when Microsoft updates the script
+# Set SKIP_HASH_CHECK=1 to bypass verification (e.g. when Microsoft rolls
+# dotnet-install.sh and the pinned hash hasn't been refreshed yet).
+VGMSTREAM_SHA256="7fc17225b7a49b8f1e7850f6cc5bdaf73c35e81ee5774bb12211ebc85188a4ff"
+# dot.net/v1/dotnet-install.sh is a rolling URL; refresh this hash whenever
+# Microsoft updates the installer (the build will abort with a clear mismatch).
+DOTNET_INSTALL_SHA256="102a6849303713f15462bb28eb10593bf874bbeec17122e0522f10a3b57ce442"
 
 APP_DIR="/app"
 VENV_DIR="/opt/app-venv"
