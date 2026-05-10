@@ -48,6 +48,10 @@ mkdir -p "$BUILD_BASE"
 
 DOTNET_CHANNEL="10.0"
 VGMSTREAM_URL="https://github.com/vgmstream/vgmstream/releases/download/r2083/vgmstream-linux-cli.zip"
+# Pin Rocksmith2014.NET to a specific commit so RsCli builds are reproducible.
+# Bump this when intentionally pulling upstream changes.
+RS2014_NET_REPO="https://github.com/iminashi/Rocksmith2014.NET.git"
+RS2014_NET_COMMIT="b87c9a3afd31c40ade9685a9244e718e7581c0cb"
 # Supply-chain hashes — regenerate with:
 #   curl -fsSL <URL> | sha256sum
 # Set SKIP_HASH_CHECK=1 to bypass verification (e.g. when Microsoft rolls
@@ -214,7 +218,6 @@ r "apt-get update -qq && apt-get install -y --no-install-recommends \
     curl \
     unzip \
     megatools \
-    git \
     && apt-get clean && rm -rf /var/lib/apt/lists/*"
 ok "System packages installed."
 
@@ -239,9 +242,10 @@ ok ".NET installed."
 # =============================================================================
 # 4. Build RsCli inside the rootfs
 # =============================================================================
-info "Cloning Rocksmith2014.NET into rootfs (host-side) …"
+info "Cloning Rocksmith2014.NET @ ${RS2014_NET_COMMIT:0:12} (host-side) …"
 rm -rf "${ROOTFS}/opt/rs2014"
-git clone --depth 1 https://github.com/iminashi/Rocksmith2014.NET.git "${ROOTFS}/opt/rs2014"
+git clone --no-checkout --filter=blob:none "${RS2014_NET_REPO}" "${ROOTFS}/opt/rs2014"
+git -C "${ROOTFS}/opt/rs2014" checkout --quiet "${RS2014_NET_COMMIT}"
  
 info "Copying rscli sources …"
 [[ -f "${PROJECT_DIR}/rscli/RsCli.fsproj" ]] || die "rscli/RsCli.fsproj not found."
@@ -259,14 +263,14 @@ PROPS=$(find "${ROOTFS}/opt/rs2014" -name "Directory.Build.props" | head -1)
 if [[ -z "$PROPS" ]]; then
   warn "Directory.Build.props not found – skipping NuGetAudit patch"
 else
-  info "  Patching: ${PROPS#$ROOTFS}"
+  info "  Patching: ${PROPS#"$ROOTFS"}"
   sed -i 's|</PropertyGroup>|<NuGetAudit>false</NuGetAudit></PropertyGroup>|' "$PROPS"
 fi
  
 # Compute the path as seen inside the container (strip the host rootfs prefix)
 FSPROJ_HOST=$(find "${ROOTFS}/opt/rs2014/tools/RsCli" -name "*.fsproj" 2>/dev/null | head -1)
 [[ -n "$FSPROJ_HOST" ]] || die "RsCli.fsproj not found under ${ROOTFS}/opt/rs2014/tools/RsCli"
-FSPROJ_INNER="${FSPROJ_HOST#$ROOTFS}"
+FSPROJ_INNER="${FSPROJ_HOST#"$ROOTFS"}"
 FSPROJ_DIR_INNER="$(dirname "$FSPROJ_INNER")"
 info "  Building project at (container path): ${FSPROJ_DIR_INNER}"
  
