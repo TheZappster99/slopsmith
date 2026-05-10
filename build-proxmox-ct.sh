@@ -323,7 +323,9 @@ for f in requirements.txt server.py VERSION main.py; do
     cp "$f" "${ROOTFS}${APP_DIR}/"
     info "  Copied ${f}"
   else
-    if [[ "$f" == "requirements.txt" || "$f" == "main.py" ]]; then
+    # main.py imports `server:app`, so without server.py the service unit
+    # would boot but fail on first request — make it fail-fast at build.
+    if [[ "$f" == "requirements.txt" || "$f" == "main.py" || "$f" == "server.py" ]]; then
       die "  '${f}' not found — required for the service to start."
     fi
     warn "  '${f}' not found – skipping."
@@ -441,22 +443,35 @@ EOF
 # Enable via symlinks on the host – systemctl inside nspawn needs a running
 # init which WSL doesn't provide.
 
+mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
 for svc in systemd-networkd systemd-resolved; do
-  mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
-  ln -sf "/lib/systemd/system/${svc}.service"          "${ROOTFS}/etc/systemd/system/multi-user.target.wants/${svc}.service" 2>/dev/null || true
+  unit_src=""
+  for d in /lib/systemd/system /usr/lib/systemd/system; do
+    if [[ -e "${ROOTFS}${d}/${svc}.service" ]]; then
+      unit_src="${d}/${svc}.service"
+      break
+    fi
+  done
+  if [[ -z "$unit_src" ]]; then
+    die "${svc}.service unit not found in rootfs — DNS/networking would be broken in the imported CT."
+  fi
+  ln -sf "${unit_src}" "${ROOTFS}/etc/systemd/system/multi-user.target.wants/${svc}.service"
 done
 
 # (d) Fix resolv.conf to use systemd-resolved stub
 rm -f "${ROOTFS}/etc/resolv.conf"
 ln -sf /run/systemd/resolve/stub-resolv.conf "${ROOTFS}/etc/resolv.conf"
 
-# (e) Ensure correct permissions on key dirs
+# (e) Ensure correct permissions on key dirs.
+# -h preserves symlinks: a Python venv keeps /opt/app-venv/bin/python3 as a
+# symlink to /usr/bin/python3, and a plain `chown -R` would chase it and
+# rewrite the system interpreter's ownership inside the rootfs.
 SVC_UID="$(r "id -u ${SVC_USER}")"
 SVC_GID="$(r "id -g ${SVC_USER}")"
-chown -R "${SVC_UID}:${SVC_GID}" \
+chown -hR "${SVC_UID}:${SVC_GID}" \
               "${ROOTFS}${APP_DIR}" "${ROOTFS}${CONFIG_DIR}" \
               "${ROOTFS}${DLC_DIR}" "${ROOTFS}${VENV_DIR}"
-chown -R 0:0 "${ROOTFS}${RSCLI_DIR}" \
+chown -hR 0:0 "${ROOTFS}${RSCLI_DIR}" \
               "${ROOTFS}${ROCKSMITH_DIR}"
 
 ok "Proxmox tweaks applied."
