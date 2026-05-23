@@ -1181,10 +1181,7 @@ function _librarySongArtUrl(song, providerId) {
     const version = song.mtime ? `?v=${Math.floor(song.mtime)}` : '';
     const localFilename = _libraryLocalFilename(song, providerId);
     if (localFilename) return `/api/song/${encodeURIComponent(localFilename)}/art${version}`;
-    if (_isLocalLibraryProvider(providerId)) {
-        const filename = localFilename;
-        return filename ? `/api/song/${encodeURIComponent(filename)}/art${version}` : '';
-    }
+    if (_isLocalLibraryProvider(providerId)) return '';
     if (!_providerSupports(providerId, 'art.read')) return '';
     const songId = _librarySongId(song);
     return songId ? `/api/library/providers/${encodeURIComponent(providerId)}/songs/${encodeURIComponent(songId)}/art${version}` : '';

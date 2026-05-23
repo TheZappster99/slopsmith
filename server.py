@@ -10,7 +10,7 @@ import sys
 import tempfile
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from logging_setup import configure_logging
 configure_logging()
@@ -741,15 +741,19 @@ class LibraryProviderRegistry:
     # provider advertises the corresponding capability so action-only providers
     # (e.g. art.read + song.sync without library.read) don't need to implement
     # unused stubs.
-    _CAPABILITY_METHODS: dict[str, tuple[str, ...]] = {
+    _CAPABILITY_METHODS: ClassVar[dict[str, tuple[str, ...]]] = {
         "library.read": ("query_page", "query_artists", "query_stats", "tuning_names"),
         "art.read": ("get_art",),
         "song.sync": ("sync_song",),
     }
-    _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+    _ID_RE: ClassVar[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
     def __init__(self):
         self._providers: dict[str, object] = {}
+        # Capabilities inferred at registration for legacy providers that omit
+        # the `capabilities` field.  Merged with provider_capabilities() so that
+        # runtime capability checks see the complete effective capability set.
+        self._inferred_caps: dict[str, set[str]] = {}
         self._lock = threading.RLock()
 
     def register(self, provider: object, *, replace: bool = False) -> object:
@@ -761,7 +765,29 @@ class LibraryProviderRegistry:
             )
         if not self.provider_label(provider):
             raise ValueError("library provider label must be a non-empty string")
-        caps = self.provider_capabilities(provider)
+        # Use declared-only caps during validation — never include stale inferred
+        # caps from a previous provider registered under the same id (replace=True).
+        caps = self._declared_capabilities(provider)
+        # Backward compatibility: providers that predate explicit capability
+        # declarations may omit `capabilities` entirely. If the browse methods
+        # are all present, infer `library.read` so they still work unchanged.
+        # If capabilities are absent but the browse surface is also absent,
+        # raise a clear error rather than letting the provider register and
+        # then fail on every API call with a late 501.
+        inferred: set[str] = set()
+        if not caps:
+            browse_methods = self._CAPABILITY_METHODS["library.read"]
+            if all(callable(self.provider_method(provider, m)) for m in browse_methods):
+                # Legacy provider without explicit capabilities — infer library.read
+                # from the presence of all browse methods.  Store in _inferred_caps
+                # so that runtime capability checks see the full effective set.
+                inferred = {"library.read"}
+                caps = inferred
+            else:
+                raise TypeError(
+                    f"library provider {provider_id!r} must declare at least one capability "
+                    f"(or implement the {browse_methods!r} browse methods for backward compatibility)"
+                )
         for cap, methods in self._CAPABILITY_METHODS.items():
             if cap not in caps:
                 continue
@@ -774,12 +800,17 @@ class LibraryProviderRegistry:
             if provider_id in self._providers and not replace:
                 raise ValueError(f"library provider {provider_id!r} is already registered")
             self._providers[provider_id] = provider
+            if inferred:
+                self._inferred_caps[provider_id] = inferred
+            else:
+                self._inferred_caps.pop(provider_id, None)
         return provider
 
     def unregister(self, provider_id: str) -> bool:
         if provider_id == "local":
             raise ValueError("the local library provider cannot be unregistered")
         with self._lock:
+            self._inferred_caps.pop(provider_id, None)
             return self._providers.pop(provider_id, None) is not None
 
     def get(self, provider_id: str = "local") -> object | None:
@@ -818,16 +849,26 @@ class LibraryProviderRegistry:
             return ""
         return label.strip()
 
-    def provider_capabilities(self, provider: object) -> set[str]:
+    def _declared_capabilities(self, provider: object) -> set[str]:
+        """Return only the capabilities explicitly declared on the provider object."""
         raw = self.provider_field(provider, "capabilities", ())
         if raw is None:
-            return set()
-        # Guard against a common plugin authoring mistake: passing a single string
-        # instead of a list/tuple. Iterating a string produces individual characters,
-        # none of which would match a valid capability name.
+            raw = ()
         if isinstance(raw, str):
             raw = (raw,) if raw else ()
         return {str(cap) for cap in raw if cap}
+
+    def provider_capabilities(self, provider: object) -> set[str]:
+        # Guard against a common plugin authoring mistake: passing a single string
+        # instead of a list/tuple. Iterating a string produces individual characters,
+        # none of which would match a valid capability name.
+        declared = self._declared_capabilities(provider)
+        # Merge with any capabilities inferred at registration time for legacy
+        # providers that omit the `capabilities` field but implement browse methods.
+        provider_id = self.provider_id(provider)
+        with self._lock:
+            inferred = self._inferred_caps.get(provider_id, set())
+        return declared | inferred
 
     def provider_method(self, provider: object, name: str):
         if isinstance(provider, dict):
@@ -878,13 +919,16 @@ def _call_library_provider(provider: object, method_name: str, **kwargs) -> Any:
         raise
     except Exception as exc:
         provider_id = library_providers.provider_id(provider)
-        # Treat any non-local provider as remote for error-wrapping purposes.
-        # A plugin may omit `kind` entirely; check against the provider id rather
-        # than relying on the optional field to avoid leaking raw exceptions.
-        is_remote = provider_id != "local"
-        if not is_remote:
-            provider_kind = str(library_providers.provider_field(provider, "kind", "") or "")
+        # A provider with an explicit kind="local" is treated as local even if
+        # its id is not "local" (e.g. a kind="local" plugin variant). Otherwise
+        # fall back to provider_id comparison so providers that omit `kind` are
+        # still wrapped correctly — the safe default for unknown providers is to
+        # surface an offline message rather than leaking raw exceptions.
+        provider_kind = str(library_providers.provider_field(provider, "kind", "") or "")
+        if provider_kind:
             is_remote = provider_kind not in ("", "local")
+        else:
+            is_remote = provider_id != "local"
         if is_remote:
             detail = f"This source appears to be offline ({provider_id})."
             message = str(exc).strip()
@@ -904,10 +948,11 @@ async def _call_library_provider_async(provider: object, method_name: str, **kwa
             raise
         except Exception as exc:
             provider_id = library_providers.provider_id(provider)
-            is_remote = provider_id != "local"
-            if not is_remote:
-                provider_kind = str(library_providers.provider_field(provider, "kind", "") or "")
+            provider_kind = str(library_providers.provider_field(provider, "kind", "") or "")
+            if provider_kind:
                 is_remote = provider_kind not in ("", "local")
+            else:
+                is_remote = provider_id != "local"
             if is_remote:
                 detail = f"This source appears to be offline ({provider_id})."
                 message = str(exc).strip()
