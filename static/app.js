@@ -112,13 +112,13 @@ function _libNavItems() {
         // the currently-displayed nodes so collapsed children don't
         // count as targets the keyboard can land on.
         const all = Array.from(tree.querySelectorAll(
-            '.artist-header, .album-header, .song-row[data-play], .song-row[data-library-song]'
+            '.artist-header, .album-header, .song-row[data-play], .song-row[data-library-song][tabindex="0"]'
         ));
         items = all.filter(_isElementVisible);
         container = tree;
         mode = 'list';
     } else {
-        items = Array.from((grid || document).querySelectorAll('.song-card[data-play], .song-card[data-library-song]'));
+        items = Array.from((grid || document).querySelectorAll('.song-card[data-play], .song-card[data-library-song][tabindex="0"]'));
         container = grid;
         mode = 'grid';
     }
