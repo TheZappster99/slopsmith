@@ -295,6 +295,9 @@ function _restoreLibSelection(scopeEl, screen, { scroll = true } = {}) {
     // Local entries: match data-play (f) + data-library-provider (p) when p
     // is present to avoid cross-provider collisions on the same filename.
     // Remote entries: match data-library-song (s) + data-library-provider (p).
+    // When f is present but no data-play card matches (e.g. the file has not
+    // been downloaded on this load), fall back to the s (provider song-id) so
+    // a previously-synced remote selection can still be restored.
     let el = null;
     if (saved.f) {
         const candidates = scopeEl.querySelectorAll('.song-card[data-play], .song-row[data-play]');
@@ -303,7 +306,8 @@ function _restoreLibSelection(scopeEl, screen, { scroll = true } = {}) {
             if (saved.p && node.dataset.libraryProvider !== saved.p) return false;
             return true;
         });
-    } else if (saved.s) {
+    }
+    if (!el && saved.s) {
         const candidates = scopeEl.querySelectorAll('.song-card[data-library-song], .song-row[data-library-song]');
         el = Array.from(candidates).find((node) => {
             if (node.dataset.librarySong !== saved.s) return false;

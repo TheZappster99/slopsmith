@@ -1000,8 +1000,12 @@ def _library_art_response(result: Any) -> Response:
                 status_code=400,
                 detail="Library provider returned an unsupported URL scheme for art",
             )
+        if not Path(result).is_file():
+            raise HTTPException(status_code=404, detail="Library provider returned an unreadable art path")
         return FileResponse(result)
     if isinstance(result, Path):
+        if not result.is_file():
+            raise HTTPException(status_code=404, detail="Library provider returned an unreadable art path")
         return FileResponse(str(result))
     if isinstance(result, dict):
         url = result.get("url") or result.get("art_url") or result.get("artUrl")
@@ -1013,6 +1017,8 @@ def _library_art_response(result: Any) -> Response:
         path = result.get("path") or result.get("file")
         if isinstance(path, (str, Path)):
             media_type = result.get("media_type") or result.get("content_type")
+            if not Path(path).is_file():
+                raise HTTPException(status_code=404, detail="Library provider returned an unreadable art path")
             return FileResponse(str(path), media_type=media_type)
         content = result.get("content") or result.get("bytes")
         if isinstance(content, (bytes, bytearray, memoryview)):
