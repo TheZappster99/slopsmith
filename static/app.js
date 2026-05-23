@@ -1912,6 +1912,10 @@ function goFavTreePage(p) {
 
 // ── Settings ─────────────────────────────────────────────────────────────
 async function loadSettings() {
+    // App Updates UI does not depend on /api/settings — run it first so a
+    // failed fetch below still leaves the desktop updater wired up.
+    // setupAppUpdates() is idempotent via _appUpdatesWired.
+    setupAppUpdates();
     const resp = await fetch('/api/settings');
     const data = await resp.json();
     document.getElementById('dlc-path').value = data.dlc_dir || '';
@@ -1943,6 +1947,306 @@ async function loadSettings() {
     // Native folder picker — only present when running inside slopsmith-desktop.
     if (window.slopsmithDesktop && typeof window.slopsmithDesktop.pickDirectory === 'function') {
         document.getElementById('btn-pick-dlc')?.classList.remove('hidden');
+    }
+}
+
+// ── App Updates (desktop-only) ───────────────────────────────────────────
+// Velopack auto-update controls, rendered as the first block of the Settings
+// page. Whole block stays hidden in the plain web app; unhide + wire only
+// when the slopsmith-desktop bridge (window.slopsmithDesktop.update) is
+// present. On Linux the block renders but its controls are disabled — the
+// desktop reports platform === 'linux' and short-circuits the IPC.
+
+const APP_UPDATE_CHANNELS = ['stable', 'rc', 'beta', 'alpha'];
+let _appUpdatesWired = false;
+
+function setupAppUpdates() {
+    const block = document.getElementById('app-updates-block');
+    if (!block) return;
+    const updateApi = window.slopsmithDesktop?.update;
+    // Per-method capability check: an older or partial slopsmith-desktop
+    // bridge may expose `update` without the full shape. Skip wiring (and
+    // leave the block hidden) rather than throwing on first interaction.
+    if (!updateApi
+        || typeof updateApi.getStatus !== 'function'
+        || typeof updateApi.setChannel !== 'function'
+        || typeof updateApi.checkNow !== 'function') {
+        return;
+    }
+
+    block.classList.remove('hidden');
+
+    const channelSelect = document.getElementById('app-update-channel');
+    const checkBtn = document.getElementById('app-update-check-now');
+    const statusEl = document.getElementById('app-update-status');
+    const linuxNote = document.getElementById('app-update-linux-note');
+    if (!channelSelect || !checkBtn || !statusEl) return;
+
+    // localStorage access can throw in storage-restricted contexts (sandbox
+    // iframes, privacy modes, etc.); fall back to the default channel so the
+    // panel still renders rather than aborting wiring entirely.
+    let storedRaw = null;
+    try { storedRaw = localStorage.getItem('slopsmith-update-channel'); } catch (_) { /* fall through */ }
+    const stored = APP_UPDATE_CHANNELS.includes(storedRaw) ? storedRaw : 'stable';
+    channelSelect.value = stored;
+
+    const isLinux = window.slopsmithDesktop?.platform === 'linux';
+
+    function showLinuxFallback(message) {
+        if (linuxNote) linuxNote.classList.remove('hidden');
+        channelSelect.disabled = true;
+        checkBtn.disabled = true;
+        statusEl.textContent = message || 'Auto-update is not available on this platform.';
+    }
+
+    function fmtTimestamp(ts) {
+        if (!ts) return 'never';
+        try {
+            const d = new Date(ts);
+            return Number.isNaN(d.getTime()) ? 'never' : d.toLocaleString();
+        } catch (_) { return 'never'; }
+    }
+
+    function renderStatus(extra) {
+        try {
+            // Wrap in Promise.resolve so a future getStatus() that returns
+            // synchronously won't blow up on .then().
+            void Promise.resolve(updateApi.getStatus()).then((s) => {
+                if (!s) { statusEl.textContent = extra || 'Updater status unavailable.'; return; }
+                if (s.status === 'unsupported' || s.platform === 'linux') {
+                    showLinuxFallback('Auto-update is not available on Linux.');
+                    return;
+                }
+                if (s.status === 'error') {
+                    const errMsg = s.message ? `Update error: ${s.message}` : 'Update check failed.';
+                    statusEl.textContent = extra ? `${extra} · ${errMsg}` : errMsg;
+                    return;
+                }
+                const parts = [
+                    `Version ${s.currentVersion || '?'}`,
+                    `channel ${s.channel || channelSelect.value}`,
+                    `last checked ${fmtTimestamp(s.lastChecked)}`,
+                ];
+                statusEl.textContent = extra ? `${extra} · ${parts.join(' · ')}` : parts.join(' · ');
+            }).catch((e) => {
+                console.warn('[updater] getStatus failed:', e);
+                statusEl.textContent = extra || 'Failed to read updater status.';
+            });
+        } catch (e) {
+            console.warn('[updater] getStatus threw:', e);
+            statusEl.textContent = extra || 'Failed to read updater status.';
+        }
+    }
+
+    if (isLinux) {
+        showLinuxFallback('Auto-update is not available on Linux.');
+        // Keep main informed of the persisted channel even on Linux so
+        // cross-platform reasoning about the channel stays consistent.
+        // setChannel() may return a Promise — chain .catch() so a rejected
+        // promise doesn't surface as an unhandled rejection.
+        try {
+            void Promise.resolve(updateApi.setChannel(stored)).catch((e) => {
+                console.warn('[updater] setChannel(linux) failed:', e);
+            });
+        } catch (e) {
+            console.warn('[updater] setChannel(linux) threw:', e);
+        }
+        return;
+    }
+
+    // Inform main of the persisted channel on each load. setChannel() on
+    // main is idempotent when the channel already matches.
+    try {
+        void Promise.resolve(updateApi.setChannel(stored)).catch((e) => {
+            console.warn('[updater] setChannel(initial) failed:', e);
+        });
+    } catch (e) {
+        console.warn('[updater] setChannel(initial) threw:', e);
+    }
+
+    if (!_appUpdatesWired) {
+        // Wire DOM listeners once. The elements live in static index.html
+        // and are not recreated, so re-wiring on every loadSettings() call
+        // would just stack duplicate handlers.
+        channelSelect.addEventListener('change', async () => {
+            const val = channelSelect.value;
+            if (!APP_UPDATE_CHANNELS.includes(val)) return;
+            try { localStorage.setItem('slopsmith-update-channel', val); } catch (_) {}
+            try {
+                // Await setChannel so the status line reflects what actually
+                // happened — rendering "Channel set" unconditionally would
+                // mislead users when the IPC rejects.
+                await Promise.resolve(updateApi.setChannel(val));
+                renderStatus(`Channel set to ${val}.`);
+            } catch (e) {
+                console.warn('[updater] setChannel failed:', e);
+                renderStatus(`Failed to set channel to ${val}: ${e?.message || e}`);
+            }
+        });
+
+        checkBtn.addEventListener('click', async () => {
+            checkBtn.disabled = true;
+            statusEl.textContent = 'Checking for updates…';
+            let reEnableBtn = true;
+            try {
+                const result = await updateApi.checkNow();
+                const status = result?.status || 'unknown';
+                let msg;
+                switch (status) {
+                    case 'idle':
+                        msg = "You're on the newest version in this channel.";
+                        break;
+                    case 'downloading':
+                        msg = 'Update available — downloading…';
+                        break;
+                    case 'downloaded':
+                        msg = 'Update downloaded — restart to apply.';
+                        break;
+                    case 'unsupported':
+                        reEnableBtn = false;
+                        showLinuxFallback('Auto-update is not available on Linux.');
+                        return;
+                    case 'error':
+                        msg = `Update check failed${result?.message ? `: ${result.message}` : '.'}`;
+                        break;
+                    default:
+                        msg = `Update check returned: ${status}`;
+                }
+                renderStatus(msg);
+            } catch (e) {
+                console.warn('[updater] checkNow failed:', e);
+                statusEl.textContent = `Update check failed: ${e?.message || e}`;
+            } finally {
+                if (reEnableBtn) checkBtn.disabled = false;
+            }
+        });
+
+        _appUpdatesWired = true;
+    }
+
+    renderStatus();
+}
+
+// ── Restart banner (desktop-only) ────────────────────────────────────────
+// Subscribes to window.slopsmithDesktop.update.onDownloaded and renders a
+// persistent banner with a "Restart now" button. Runs once at app boot so a
+// download finishing while the user is on a non-Settings screen still pops
+// the banner.
+
+function initAppUpdateBanner() {
+    const updateApi = window.slopsmithDesktop?.update;
+    // Same capability gate as setupAppUpdates — the banner needs onDownloaded
+    // to subscribe, getStatus to detect pre-existing pending updates on boot,
+    // and apply to actually restart from the button. A bridge missing any
+    // of these would partially fail; better to no-op cleanly.
+    if (!updateApi
+        || typeof updateApi.onDownloaded !== 'function'
+        || typeof updateApi.getStatus !== 'function'
+        || typeof updateApi.apply !== 'function') {
+        return;
+    }
+
+    const BANNER_ID = 'slopsmith-update-banner';
+
+    function renderUpdateBanner(payload) {
+        // Avoid stacking duplicate banners if onDownloaded fires more than once.
+        if (document.getElementById(BANNER_ID)) return;
+
+        const banner = document.createElement('div');
+        banner.id = BANNER_ID;
+        banner.setAttribute('role', 'status');
+        banner.style.cssText = [
+            'position:fixed', 'top:0', 'left:0', 'right:0',
+            'z-index:99999', 'padding:10px 16px',
+            'background:linear-gradient(90deg,#1e3a8a,#4338ca)',
+            'color:#fff', 'font-size:13px',
+            'font-family:system-ui,sans-serif',
+            'display:flex', 'align-items:center', 'justify-content:space-between',
+            'gap:12px', 'box-shadow:0 2px 8px rgba(0,0,0,0.4)',
+        ].join(';');
+
+        const text = document.createElement('span');
+        const version = payload && payload.version ? ` (${payload.version})` : '';
+        text.textContent = `Update downloaded${version} — restart to apply.`;
+
+        const actions = document.createElement('span');
+        actions.style.cssText = 'display:flex;gap:8px;align-items:center';
+
+        const restartBtn = document.createElement('button');
+        restartBtn.textContent = 'Restart now';
+        restartBtn.style.cssText = [
+            'padding:4px 12px', 'border-radius:4px',
+            'background:#fff', 'color:#1e3a8a', 'border:none',
+            'font-weight:600', 'cursor:pointer', 'font-size:13px',
+        ].join(';');
+        restartBtn.addEventListener('click', async () => {
+            restartBtn.disabled = true;
+            restartBtn.textContent = 'Restarting…';
+            try {
+                // apply() can resolve with { status: 'error' } instead of
+                // throwing; only re-enable the button on that path.
+                const result = await updateApi.apply();
+                if (result?.status === 'error') {
+                    console.warn('[updater] apply returned error:', result.message || 'unknown');
+                    restartBtn.disabled = false;
+                    restartBtn.textContent = 'Restart now';
+                }
+            } catch (e) {
+                console.warn('[updater] apply failed:', e);
+                restartBtn.disabled = false;
+                restartBtn.textContent = 'Restart now';
+            }
+        });
+
+        const dismissBtn = document.createElement('button');
+        dismissBtn.textContent = 'Later';
+        dismissBtn.setAttribute('aria-label', 'Dismiss update banner');
+        dismissBtn.style.cssText = [
+            'padding:4px 10px', 'border-radius:4px',
+            'background:transparent', 'color:#fff',
+            'border:1px solid rgba(255,255,255,0.3)',
+            'cursor:pointer', 'font-size:13px',
+        ].join(';');
+        dismissBtn.addEventListener('click', () => banner.remove());
+
+        actions.appendChild(restartBtn);
+        actions.appendChild(dismissBtn);
+        banner.appendChild(text);
+        banner.appendChild(actions);
+
+        const insert = () => {
+            if (document.body) document.body.appendChild(banner);
+            else document.addEventListener('DOMContentLoaded', () => document.body.appendChild(banner), { once: true });
+        };
+        insert();
+    }
+
+    try {
+        updateApi.onDownloaded((payload) => {
+            try { renderUpdateBanner(payload); }
+            catch (e) { console.warn('[updater] renderUpdateBanner failed:', e); }
+        });
+    } catch (e) {
+        console.warn('[updater] onDownloaded subscribe failed:', e);
+    }
+
+    // Catch pre-existing pending updates (downloaded in a previous session,
+    // or restored on launch). onDownloaded only fires for downloads that
+    // complete in the current session, so do an explicit status check too.
+    try {
+        void Promise.resolve(updateApi.getStatus()).then((status) => {
+            // Render the banner for any 'downloaded' status; the version
+            // string is best-effort — renderUpdateBanner() already drops the
+            // "(vX.Y.Z)" suffix when none is supplied, so an update reported
+            // without pending.version still surfaces the restart prompt.
+            if (status && status.status === 'downloaded') {
+                renderUpdateBanner({ version: status.pending?.version, channel: status.channel });
+            }
+        }).catch((e) => {
+            console.warn('[updater] getStatus on init failed:', e);
+        });
+    } catch (e) {
+        console.warn('[updater] getStatus on init threw:', e);
     }
 }
 
@@ -6209,6 +6513,10 @@ async function bootstrapPluginsAndUi() {
     // toggling and triggers the initial load.
     setLibView(libView);
     try { await loadSettings(); } catch (e) { console.warn('initial loadSettings failed:', e); }
+    // App-wide restart banner — must wire once, outside loadSettings(), so a
+    // download finishing while the user is on a non-Settings screen still
+    // pops the banner.
+    try { initAppUpdateBanner(); } catch (e) { console.warn('initAppUpdateBanner failed:', e); }
     // Seed the track fill on every themed slider so they render correctly
     // before any interaction — e.g. the speed slider (untouched by
     // loadSettings) before the first playSong, or follower windows that
