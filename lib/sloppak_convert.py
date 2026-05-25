@@ -1016,6 +1016,18 @@ def _maybe_transcribe_lyrics(
     Returns True when lyrics were written, False otherwise. All
     exceptions are caught and logged at WARNING — the caller treats
     transcription as best-effort."""
+    # Split this step's reserved slice between lyric transcription and
+    # the optional pitch extraction that runs on its output. Pitch
+    # takes the tail; transcription owns the head. Defined at the top
+    # of the function so the inner progress callbacks below (which
+    # scale WhisperX's 0..1 into our slice) can rescale into the lyric
+    # sub-portion rather than the whole slice — otherwise WhisperX
+    # progress could overshoot the lyric/pitch boundary and the bar
+    # would visibly move backwards once the lyric phase completes.
+    _LYRIC_PORTION = 0.7
+    _lyric_span = span_frac * _LYRIC_PORTION
+    _pitch_span = span_frac - _lyric_span
+
     # Helper: emit a "skip" progress update at the end of this step's
     # reserved slice so callers' progress printers / UIs don't stall
     # short of base_frac + span_frac when the transcription bails on
@@ -1068,13 +1080,15 @@ def _maybe_transcribe_lyrics(
     # server hosts WhisperX at /align too), else local in-process.
     server_url = cfg["server_url"] or _get_demucs_server_url()
 
-    _progress(progress_cb, base_frac + span_frac * 0.10, "transcribing",
+    _progress(progress_cb, base_frac + _lyric_span * 0.10, "transcribing",
               "Transcribing vocals" + (f" (remote: {server_url})" if server_url else " (local)"))
 
     def _inner_cb(frac: float, stage: str, msg: str) -> None:
-        # Re-scale the transcriber's 0..1 progress into the slice this
-        # step owns in the outer convert/split pipeline.
-        _progress(progress_cb, base_frac + span_frac * (0.10 + 0.80 * frac), stage, msg)
+        # Re-scale the transcriber's 0..1 progress into the LYRIC
+        # sub-portion of our slice — so the lyric phase tops out at
+        # base + _lyric_span and the pitch phase has room to advance
+        # the bar further without it visibly moving backwards.
+        _progress(progress_cb, base_frac + _lyric_span * (0.10 + 0.80 * frac), stage, msg)
 
     try:
         if server_url:
@@ -1148,19 +1162,12 @@ def _maybe_transcribe_lyrics(
                 pass
         return _skip(f"Failed to write lyrics: {e}")
 
-    # Reserve a sub-slice of our span for pitch extraction so the
-    # UI / log progress bar doesn't pin at 100% while CREPE is still
-    # uploading + running server-side. Lyric transcription owns the
-    # first chunk, pitch the tail. The actual slice fraction is
-    # arbitrary; 30% for pitch reflects that upload + remote inference
-    # is typically faster than WhisperX alignment but still
-    # user-visible.
-    _LYRIC_PORTION = 0.7
-    lyric_done_frac = base_frac + span_frac * _LYRIC_PORTION
-    pitch_base = lyric_done_frac
-    pitch_span = base_frac + span_frac - lyric_done_frac
-
-    _progress(progress_cb, lyric_done_frac, "transcribing",
+    # Lyric phase complete — flush to the top of its sub-portion
+    # (computed up-front as _lyric_span) so the bar settles cleanly
+    # at the lyric/pitch boundary before _maybe_extract_pitch takes
+    # over the tail. _inner_cb already scales WhisperX into this
+    # same sub-portion, so no backward motion is possible here.
+    _progress(progress_cb, base_frac + _lyric_span, "transcribing",
               f"Wrote {len(lyrics)} lyric tokens")
     log.info("_maybe_transcribe_lyrics: wrote %d tokens to %s", len(lyrics), lyrics_path)
 
@@ -1170,8 +1177,8 @@ def _maybe_transcribe_lyrics(
     _maybe_extract_pitch(
         source_dir, lyrics, vocals_path,
         progress_cb=progress_cb,
-        base_frac=pitch_base,
-        span_frac=pitch_span,
+        base_frac=base_frac + _lyric_span,
+        span_frac=_pitch_span,
     )
     # Flush to the top of our reserved slice regardless of whether
     # pitch ran, so the caller's progress bar always reaches the
