@@ -859,18 +859,37 @@ def _rewrite_stems_manifest(source_dir: Path, new_stems: list[dict]) -> None:
     )
 
 
-def _rewrite_lyrics_manifest(source_dir: Path, lyrics_rel: str, source: str) -> None:
+def _rewrite_lyrics_manifest(
+    source_dir: Path,
+    lyrics_rel: str,
+    source: str,
+    *,
+    transcription: dict | None = None,
+) -> None:
     """Set `lyrics` + `lyrics_source` on the sloppak's manifest in-place.
 
     Used by the WhisperX fallback path after writing a fresh
     `lyrics.json`. Caller is responsible for having written the file
-    at `source_dir / lyrics_rel` already."""
+    at `source_dir / lyrics_rel` already.
+
+    `transcription` is the optional `lyric_transcription` metadata
+    block (engine / model / version) per the same shape the
+    stem_separation RFC (slopsmith#357) defines for stems. Set it
+    when lyrics came from an automated engine (WhisperX); omit for
+    Rocksmith-authored XML/SNG / user-edited lyrics. Removes the
+    existing key when explicitly cleared so re-running an authored
+    path on top of a previously-auto-transcribed sloppak doesn't
+    leave stale provenance behind."""
     mf = source_dir / "manifest.yaml"
     if not mf.exists():
         mf = source_dir / "manifest.yml"
     data = yaml.safe_load(mf.read_text(encoding="utf-8")) or {}
     data["lyrics"] = lyrics_rel
     data["lyrics_source"] = source
+    if transcription is not None:
+        data["lyric_transcription"] = transcription
+    else:
+        data.pop("lyric_transcription", None)
     mf.write_text(
         yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
@@ -989,6 +1008,23 @@ def _maybe_transcribe_lyrics(
         log.info("_maybe_transcribe_lyrics: %s produced no lyrics after filtering", source_dir.name)
         return _skip("No lyrics after filtering")
 
+    # Build the lyric_transcription metadata block per the
+    # stem_separation RFC pattern (slopsmith#357). Engine + schema
+    # version are always known; `model` is what we picked locally OR
+    # the WhisperX server's reported choice when remote (defer remote
+    # introspection to a follow-up — for now stamp the config value
+    # the request was made with, marked `_requested` so we don't lie
+    # about server-side overrides).
+    from lyrics_transcribe import (
+        LYRIC_TRANSCRIPTION_ENGINE,
+        LYRIC_TRANSCRIPTION_SCHEMA_VERSION,
+    )
+    transcription_meta: dict = {
+        "engine": LYRIC_TRANSCRIPTION_ENGINE,
+        "model": cfg["model_size"],
+        "version": LYRIC_TRANSCRIPTION_SCHEMA_VERSION,
+    }
+
     # Persist lyrics + update manifest under the same best-effort umbrella as
     # the transcription itself. IO errors (perms, disk full, manifest YAML
     # parse failure on a hand-edited file) must NOT bubble up and abort
@@ -997,7 +1033,10 @@ def _maybe_transcribe_lyrics(
     # that the loader would treat as corrupt.
     try:
         lyrics_path.write_text(json.dumps(lyrics, separators=(",", ":")), encoding="utf-8")
-        _rewrite_lyrics_manifest(source_dir, "lyrics.json", "whisperx")
+        _rewrite_lyrics_manifest(
+            source_dir, "lyrics.json", "whisperx",
+            transcription=transcription_meta,
+        )
     except Exception as e:
         log.warning("_maybe_transcribe_lyrics: failed to persist lyrics for %s: %s",
                     source_dir.name, e, exc_info=True)

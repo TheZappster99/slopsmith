@@ -131,6 +131,18 @@ _LINE_BREAK_GAP_SECONDS = 1.5
 # fade timing expects a non-zero `d`, so clamp here.
 _MIN_WORD_DURATION = 0.05
 
+# Semver for the lyric-transcription artifact contract that gets stamped
+# into the sloppak manifest's `lyric_transcription` block alongside the
+# engine + model. Bump per the semantics defined in slopsmith#357 (the
+# parent `stem_separation` RFC):
+#   * patch — metadata-only or implementation fixes; no regeneration
+#   * minor — backward-compatible additions
+#   * major — output shape / semantics changed; existing transcriptions
+#            should be regenerated
+# Independent from any upstream WhisperX / Whisper / wav2vec2 version.
+LYRIC_TRANSCRIPTION_SCHEMA_VERSION = "1.0.0"
+LYRIC_TRANSCRIPTION_ENGINE = "whisperx"
+
 
 def _whisperx_to_sloppak(aligned: dict, min_score: float) -> list[dict]:
     """Map WhisperX `aligned` output to sloppak `lyrics.json` shape.
