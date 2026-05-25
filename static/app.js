@@ -1,6 +1,30 @@
 // Demo analytics — real impl set by demo.js; no-op in normal builds
 window.slopsmithDemoTrack = window.slopsmithDemoTrack ?? null;
 
+// Sync the play/pause button's icon and accessible state in one place so
+// screen readers, tooltips, and aria-pressed stay aligned with playback.
+// Updates the existing <img> child's src in place rather than rewriting
+// innerHTML, so any future children (fallback label, loading spinner, …)
+// survive state changes.
+function setPlayButtonState(isPlaying) {
+    const btn = document.getElementById('btn-play');
+    if (!btn) return;
+    const label = isPlaying ? 'Pause' : 'Play';
+    const icon = isPlaying ? 'pause' : 'play';
+    let img = btn.querySelector('img.button-icon-svg');
+    if (!img) {
+        img = document.createElement('img');
+        img.className = 'button-icon-svg';
+        img.alt = '';
+        img.setAttribute('aria-hidden', 'true');
+        btn.appendChild(img);
+    }
+    img.src = `/static/svg/${icon}.svg`;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-pressed', isPlaying ? 'true' : 'false');
+    btn.title = label;
+}
+
 // ── Global keyboard shortcuts ─────────────────────────────────────────────
 //
 // `/` focuses the active screen's search input (Library / Favorites);
@@ -979,7 +1003,7 @@ async function showScreen(id) {
         // Reloading any song later should get a fresh JUCE routing attempt.
         window._clearJuceRerouteMemo?.();
         isPlaying = false;
-        document.getElementById('btn-play').textContent = '▶ Play';
+        setPlayButtonState(false);
     }
     window.scrollTo(0, 0);
     if (window.slopsmith) window.slopsmith.emit('screen:changed', { id });
@@ -4042,7 +4066,7 @@ let _resetJuceAudioShimChain = function () {};
                     await jucePlayer.pause();
                     if (gen !== _juceShimGen) return;
                     isPlaying = false;
-                    document.getElementById('btn-play').textContent = '▶ Play';
+                    setPlayButtonState(false);
                     const sm = window.slopsmith;
                     if (sm) {
                         sm.isPlaying = false;
@@ -4058,7 +4082,7 @@ let _resetJuceAudioShimChain = function () {};
                 await jucePlayer.pause();
                 if (gen !== _juceShimGen) return;
                 isPlaying = false;
-                document.getElementById('btn-play').textContent = '▶ Play';
+                setPlayButtonState(false);
                 const sm = window.slopsmith;
                 if (sm) {
                     sm.isPlaying = false;
@@ -4138,7 +4162,7 @@ let _resetJuceAudioShimChain = function () {};
                 const started = await jucePlayer.play();
                 if (gen !== _juceShimGen || !started) return;
                 isPlaying = true;
-                document.getElementById('btn-play').textContent = '⏸ Pause';
+                setPlayButtonState(true);
                 const sm = window.slopsmith;
                 if (sm) {
                     sm.isPlaying = true;
@@ -4346,7 +4370,7 @@ audio.addEventListener('stalled', () => console.log('Audio stalled at', audio.cu
 audio.addEventListener('waiting', () => console.log('Audio waiting/buffering at', audio.currentTime.toFixed(1)));
 audio.addEventListener('ended', () => {
     console.log('Audio ended'); isPlaying = false;
-    document.getElementById('btn-play').textContent = '▶ Play';
+    setPlayButtonState(false);
     window.slopsmith.isPlaying = false;
     window.slopsmith.emit('song:ended', _songEventPayload());
 });
@@ -4413,7 +4437,7 @@ async function playSong(filename, arrangement) {
     // Fresh JUCE routing attempt for whatever song loads next.
     window._clearJuceRerouteMemo?.();
     isPlaying = false;
-    document.getElementById('btn-play').textContent = '▶ Play';
+    setPlayButtonState(false);
     document.getElementById('speed-slider').value = 100;
     handleSliderInput(document.getElementById('speed-slider'));
     document.getElementById('speed-label').textContent = '1.0x';
@@ -4481,7 +4505,7 @@ async function changeArrangement(index) {
                 // sm.isPlaying = false, emit song:pause so plugins see the
                 // paused state.
                 if (wasPlaying) {
-                    document.getElementById('btn-play').textContent = '▶ Play';
+                    setPlayButtonState(false);
                     if (window.slopsmith) {
                         window.slopsmith.isPlaying = false;
                         window.slopsmith.emit('song:pause', _songEventPayload());
@@ -4513,14 +4537,14 @@ async function togglePlay() {
         if (isPlaying) {
             await jucePlayer.pause();
             isPlaying = false;
-            document.getElementById('btn-play').textContent = '▶ Play';
+            setPlayButtonState(false);
             window.slopsmith.isPlaying = false;
             window.slopsmith.emit('song:pause', _songEventPayload());
         } else {
             const started = await jucePlayer.play();
             if (!started) return; // startBacking() failed — IPC error already logged
             isPlaying = true;
-            document.getElementById('btn-play').textContent = '⏸ Pause';
+            setPlayButtonState(true);
             window.slopsmith.isPlaying = true;
             window.slopsmith.emit('song:play', _songEventPayload());
         }
@@ -4528,10 +4552,10 @@ async function togglePlay() {
     }
     if (isPlaying) {
         audio.pause(); isPlaying = false;
-        document.getElementById('btn-play').textContent = '▶ Play';
+        setPlayButtonState(false);
     } else {
         audio.play(); isPlaying = true;
-        document.getElementById('btn-play').textContent = '⏸ Pause';
+        setPlayButtonState(true);
     }
 }
 
@@ -5408,7 +5432,7 @@ async function startCountIn() {
                     _countingIn = false;
                     if (isPlaying) {
                         isPlaying = false;
-                        document.getElementById('btn-play').textContent = '▶ Play';
+                        setPlayButtonState(false);
                         if (window.slopsmith) {
                             window.slopsmith.isPlaying = false;
                             window.slopsmith.emit('song:pause', _songEventPayload());
@@ -5447,14 +5471,14 @@ async function startCountIn() {
                         if (gen !== _countInGen) return; // teardown during play start
                         if (!started) return;
                         isPlaying = true;
-                        document.getElementById('btn-play').textContent = '⏸ Pause';
+                        setPlayButtonState(true);
                         window.slopsmith.isPlaying = true;
                         window.slopsmith.emit('song:play', _songEventPayload());
                     }).catch((err) => console.error('[app] jucePlayer.play error:', err));
                 } else {
                     audio.play();
                     isPlaying = true;
-                    document.getElementById('btn-play').textContent = '⏸ Pause';
+                    setPlayButtonState(true);
                 }
                 return;
             }
@@ -5475,7 +5499,7 @@ setInterval(() => {
         // JUCE end-of-track: HTML5 fires 'ended'; JUCE needs a manual check
         if (window._juceMode && isPlaying && ct >= dur) {
             isPlaying = false;
-            document.getElementById('btn-play').textContent = '▶ Play';
+            setPlayButtonState(false);
             window.slopsmith.isPlaying = false;
             window.slopsmith.emit('song:ended', _songEventPayload());
             jucePlayer.pause().catch((err) => console.warn('[app] end-of-track pause error:', err));
