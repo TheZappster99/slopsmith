@@ -205,16 +205,16 @@ def _resolve_device(device: str | None) -> str:
         return "cpu"
 
 
-def _free_models(*models) -> None:
-    """Release WhisperX models and free GPU memory.
+def _free_gpu_memory() -> None:
+    """Force a GC + CUDA cache flush.
 
-    Called after each transcription to keep memory low between songs in
-    batch runs. Safe to call regardless of CUDA availability."""
-    for m in models:
-        try:
-            del m
-        except Exception:
-            pass
+    Note that `del`-ing a local in a helper function only deletes the
+    helper's parameter binding, not the caller's reference — to actually
+    drop the model the caller must null its own variables (see the
+    finally block in `transcribe_vocals_local`). This helper only handles
+    the GC + CUDA side, which is the same regardless of who held the
+    references. Safe to call regardless of CUDA availability or whether
+    torch is even installed."""
     gc.collect()
     try:
         import torch
@@ -271,6 +271,14 @@ def transcribe_vocals_local(
     # load_audio / transcribe / load_align_model still frees the ASR model —
     # otherwise a bad stem in the middle of a batch run strands GPU memory and
     # the next song's load_model OOMs.
+    #
+    # Caller-side `= None` reassignment is the only way to actually drop the
+    # references here; a helper's `del m` only releases the helper's binding,
+    # leaving the caller's reference live and the GPU memory pinned until
+    # this function returns. That defeats the purpose of running gc + empty
+    # cache mid-batch — by the time the next song's transcribe_vocals_local
+    # fires, we want the previous model GONE, not held until the caller
+    # frame unwinds.
     asr_model = align_model = align_metadata = None
     try:
         asr_model = whisperx.load_model(model_size, resolved_device, compute_type=resolved_compute)
@@ -299,7 +307,10 @@ def transcribe_vocals_local(
             resolved_device, return_char_alignments=False,
         )
     finally:
-        _free_models(asr_model, align_model, align_metadata)
+        asr_model = None
+        align_model = None
+        align_metadata = None
+        _free_gpu_memory()
 
     if progress_cb:
         try:

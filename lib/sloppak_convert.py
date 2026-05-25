@@ -980,8 +980,25 @@ def _maybe_transcribe_lyrics(
         log.info("_maybe_transcribe_lyrics: %s produced no lyrics after filtering", source_dir.name)
         return _skip("No lyrics after filtering")
 
-    lyrics_path.write_text(json.dumps(lyrics, separators=(",", ":")), encoding="utf-8")
-    _rewrite_lyrics_manifest(source_dir, "lyrics.json", "whisperx")
+    # Persist lyrics + update manifest under the same best-effort umbrella as
+    # the transcription itself. IO errors (perms, disk full, manifest YAML
+    # parse failure on a hand-edited file) must NOT bubble up and abort
+    # the surrounding stem-split. Clean up a partially-written lyrics.json
+    # so the next pass sees a clean state instead of half-written JSON
+    # that the loader would treat as corrupt.
+    try:
+        lyrics_path.write_text(json.dumps(lyrics, separators=(",", ":")), encoding="utf-8")
+        _rewrite_lyrics_manifest(source_dir, "lyrics.json", "whisperx")
+    except Exception as e:
+        log.warning("_maybe_transcribe_lyrics: failed to persist lyrics for %s: %s",
+                    source_dir.name, e, exc_info=True)
+        if lyrics_path.exists():
+            try:
+                lyrics_path.unlink()
+            except OSError:
+                pass
+        return _skip(f"Failed to write lyrics: {e}")
+
     _progress(progress_cb, base_frac + span_frac, "transcribing",
               f"Wrote {len(lyrics)} lyric tokens")
     log.info("_maybe_transcribe_lyrics: wrote %d tokens to %s", len(lyrics), lyrics_path)
@@ -1213,7 +1230,10 @@ def _transcribe_existing_in_dir(
     if vocals_path.exists():
         # State 1: vocal stem already isolated. Synthesize a `produced`
         # list with just vocals so `_maybe_transcribe_lyrics` recognizes
-        # the stem is available — manifest is not rewritten in this path.
+        # the stem is available. The stems portion of the manifest is
+        # left untouched (we're not rewriting it like the split path
+        # does) — only the lyrics/lyrics_source keys get updated by
+        # `_maybe_transcribe_lyrics` on a successful pass.
         produced = [{"id": "vocals", "file": "stems/vocals.ogg", "default": "on"}]
         return _maybe_transcribe_lyrics(
             source_dir, produced,
