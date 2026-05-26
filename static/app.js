@@ -1,6 +1,30 @@
 // Demo analytics — real impl set by demo.js; no-op in normal builds
 window.slopsmithDemoTrack = window.slopsmithDemoTrack ?? null;
 
+// Sync the play/pause button's icon and accessible state in one place so
+// screen readers, tooltips, and aria-pressed stay aligned with playback.
+// Updates the existing <img> child's src in place rather than rewriting
+// innerHTML, so any future children (fallback label, loading spinner, …)
+// survive state changes.
+function setPlayButtonState(isPlaying) {
+    const btn = document.getElementById('btn-play');
+    if (!btn) return;
+    const label = isPlaying ? 'Pause' : 'Play';
+    const icon = isPlaying ? 'pause' : 'play';
+    let img = btn.querySelector('img.button-icon-svg');
+    if (!img) {
+        img = document.createElement('img');
+        img.className = 'button-icon-svg';
+        img.alt = '';
+        img.setAttribute('aria-hidden', 'true');
+        btn.appendChild(img);
+    }
+    img.src = `/static/svg/${icon}.svg`;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('aria-pressed', isPlaying ? 'true' : 'false');
+    btn.title = label;
+}
+
 // ── Global keyboard shortcuts ─────────────────────────────────────────────
 //
 // `/` focuses the active screen's search input (Library / Favorites);
@@ -979,7 +1003,7 @@ async function showScreen(id) {
         // Reloading any song later should get a fresh JUCE routing attempt.
         window._clearJuceRerouteMemo?.();
         isPlaying = false;
-        document.getElementById('btn-play').textContent = '▶ Play';
+        setPlayButtonState(false);
     }
     window.scrollTo(0, 0);
     if (window.slopsmith) window.slopsmith.emit('screen:changed', { id });
@@ -3590,6 +3614,14 @@ function retuneSong(filename, title, tuning, target) {
 const audio = document.getElementById('audio');
 let isPlaying = false;
 
+function _applyPreservePitch(el) {
+    if (!el) return;
+    if ('preservesPitch' in el) el.preservesPitch = true;
+    if ('mozPreservesPitch' in el) el.mozPreservesPitch = true;
+    if ('webkitPreservesPitch' in el) el.webkitPreservesPitch = true;
+}
+_applyPreservePitch(audio);
+
 // In Slopsmith Desktop, WASAPI Exclusive Mode locks the audio device so Chromium
 // cannot play through it. When window._juceMode is true, song audio is routed
 // through the JUCE backing track player instead of the HTML5 <audio> element.
@@ -4047,7 +4079,7 @@ let _resetJuceAudioShimChain = function () {};
                     await jucePlayer.pause();
                     if (gen !== _juceShimGen) return;
                     isPlaying = false;
-                    document.getElementById('btn-play').textContent = '▶ Play';
+                    setPlayButtonState(false);
                     const sm = window.slopsmith;
                     if (sm) {
                         sm.isPlaying = false;
@@ -4063,7 +4095,7 @@ let _resetJuceAudioShimChain = function () {};
                 await jucePlayer.pause();
                 if (gen !== _juceShimGen) return;
                 isPlaying = false;
-                document.getElementById('btn-play').textContent = '▶ Play';
+                setPlayButtonState(false);
                 const sm = window.slopsmith;
                 if (sm) {
                     sm.isPlaying = false;
@@ -4143,7 +4175,7 @@ let _resetJuceAudioShimChain = function () {};
                 const started = await jucePlayer.play();
                 if (gen !== _juceShimGen || !started) return;
                 isPlaying = true;
-                document.getElementById('btn-play').textContent = '⏸ Pause';
+                setPlayButtonState(true);
                 const sm = window.slopsmith;
                 if (sm) {
                     sm.isPlaying = true;
@@ -4324,6 +4356,7 @@ function _adjustSongVolume(delta) {
 // (slopsmith#54). Delegates to audio-mixer's readSongVolume when loaded so
 // the in-memory fallback (for storage-blocked contexts) is authoritative.
 audio.addEventListener('loadedmetadata', () => {
+    _applyPreservePitch(audio);
     const applySongVolume = window.slopsmith?.audio?.applySongVolume;
     if (typeof applySongVolume === 'function') {
         void applySongVolume();
@@ -4350,7 +4383,7 @@ audio.addEventListener('stalled', () => console.log('Audio stalled at', audio.cu
 audio.addEventListener('waiting', () => console.log('Audio waiting/buffering at', audio.currentTime.toFixed(1)));
 audio.addEventListener('ended', () => {
     console.log('Audio ended'); isPlaying = false;
-    document.getElementById('btn-play').textContent = '▶ Play';
+    setPlayButtonState(false);
     window.slopsmith.isPlaying = false;
     window.slopsmith.emit('song:ended', _songEventPayload());
 });
@@ -4417,7 +4450,7 @@ async function playSong(filename, arrangement) {
     // Fresh JUCE routing attempt for whatever song loads next.
     window._clearJuceRerouteMemo?.();
     isPlaying = false;
-    document.getElementById('btn-play').textContent = '▶ Play';
+    setPlayButtonState(false);
     document.getElementById('speed-slider').value = 100;
     handleSliderInput(document.getElementById('speed-slider'));
     document.getElementById('speed-label').textContent = '1.0x';
@@ -4446,6 +4479,13 @@ async function playSong(filename, arrangement) {
     document.getElementById('quality-select').value = highway.getRenderScale();
 }
 
+// Generation token + safety-timeout handle for changeArrangement's
+// aria-busy gate. Module-scoped so a newer invocation cancels the
+// previous one's pending timeout (and its _onReady callback bails when
+// the gen has moved on) rather than clearing aria-busy for itself.
+let _arrBusyGen = 0;
+let _arrBusyTimeout = null;
+
 async function changeArrangement(index) {
     if (currentFilename) {
         const wasPlaying = isPlaying;
@@ -4455,6 +4495,24 @@ async function changeArrangement(index) {
             else audio.pause();
             isPlaying = false;
         }
+
+        // Audio is paused, but the play button is intentionally left
+        // showing its pre-load state to avoid flicker if auto-resume
+        // succeeds. Tell assistive tech to wait until the load +
+        // seek-restore + auto-resume settles before re-announcing the
+        // button so screen readers don't briefly advertise stale state.
+        // Pair with a safety timeout so a websocket/server failure that
+        // never reaches `ready` can't leave the button perpetually busy.
+        const myGen = ++_arrBusyGen;
+        const playBtn = document.getElementById('btn-play');
+        if (playBtn) playBtn.setAttribute('aria-busy', 'true');
+        if (_arrBusyTimeout !== null) clearTimeout(_arrBusyTimeout);
+        _arrBusyTimeout = setTimeout(() => {
+            if (myGen !== _arrBusyGen) return;
+            _arrBusyTimeout = null;
+            const b = document.getElementById('btn-play');
+            if (b) b.removeAttribute('aria-busy');
+        }, 30000);
 
         // Show loading overlay
         let overlay = document.getElementById('arr-loading');
@@ -4469,10 +4527,33 @@ async function changeArrangement(index) {
             </div>`;
         document.body.appendChild(overlay);
 
-        // Set callback for when data is ready
-        highway._onReady = async () => {
+        // Set callback for when data is ready. Capture the function ref
+        // so a stale older invocation firing after a newer changeArrangement
+        // has installed its own callback can't clobber the newer one.
+        const myCallback = async () => {
+            // Bail in full if this invocation has been superseded. The newer
+            // changeArrangement owns the overlay (same id), its own _onReady,
+            // and the aria-busy gate; this old callback must not touch any
+            // of them.
+            if (myGen !== _arrBusyGen) return;
             const ol = document.getElementById('arr-loading');
             if (ol) ol.remove();
+            const clearBusy = () => {
+                // Double-checked because a newer invocation could land
+                // during the await below.
+                if (myGen !== _arrBusyGen) return;
+                if (_arrBusyTimeout !== null) {
+                    clearTimeout(_arrBusyTimeout);
+                    _arrBusyTimeout = null;
+                }
+                const b = document.getElementById('btn-play');
+                if (b) b.removeAttribute('aria-busy');
+            };
+            const clearMyCallback = () => {
+                // Only null out if the slot still points at us; a newer
+                // invocation may have replaced it during the await.
+                if (highway._onReady === myCallback) highway._onReady = null;
+            };
             const r = await _audioSeek(time, 'arrangement-restore');
             // Don't auto-resume on cancel OR off-target landing — same
             // 50 ms tolerance as loop-wrap / loop-set. Resuming play from
@@ -4487,13 +4568,14 @@ async function changeArrangement(index) {
                 // sm.isPlaying = false, emit song:pause so plugins see the
                 // paused state.
                 if (wasPlaying) {
-                    document.getElementById('btn-play').textContent = '▶ Play';
+                    setPlayButtonState(false);
                     if (window.slopsmith) {
                         window.slopsmith.isPlaying = false;
                         window.slopsmith.emit('song:pause', _songEventPayload());
                     }
                 }
-                highway._onReady = null;
+                clearBusy();
+                clearMyCallback();
                 return;
             }
             if (wasPlaying) {
@@ -4506,27 +4588,34 @@ async function changeArrangement(index) {
                     }
                 } else audio.play().then(() => { isPlaying = true; }).catch(() => {});
             }
-            highway._onReady = null;
+            clearBusy();
+            clearMyCallback();
         };
+        highway._onReady = myCallback;
 
         highway.reconnect(currentFilename, index);
         window.slopsmith.emit('arrangement:changed', { index, filename: currentFilename });
     }
 }
 
+// Per-attempt counter for HTML5 audio.play() invocations. Bumped on
+// every play branch entry so a slow rejection from attempt N can't
+// clobber the UI of a newer attempt N+1 within the same session.
+let _playAttemptGen = 0;
+
 async function togglePlay() {
     if (window._juceMode) {
         if (isPlaying) {
             await jucePlayer.pause();
             isPlaying = false;
-            document.getElementById('btn-play').textContent = '▶ Play';
+            setPlayButtonState(false);
             window.slopsmith.isPlaying = false;
             window.slopsmith.emit('song:pause', _songEventPayload());
         } else {
             const started = await jucePlayer.play();
             if (!started) return; // startBacking() failed — IPC error already logged
             isPlaying = true;
-            document.getElementById('btn-play').textContent = '⏸ Pause';
+            setPlayButtonState(true);
             window.slopsmith.isPlaying = true;
             window.slopsmith.emit('song:play', _songEventPayload());
         }
@@ -4534,10 +4623,31 @@ async function togglePlay() {
     }
     if (isPlaying) {
         audio.pause(); isPlaying = false;
-        document.getElementById('btn-play').textContent = '▶ Play';
+        setPlayButtonState(false);
     } else {
-        audio.play(); isPlaying = true;
-        document.getElementById('btn-play').textContent = '⏸ Pause';
+        // Flip the UI optimistically before awaiting the play() Promise so
+        // a quick second click during a slow start (buffering, device
+        // wake, etc.) still enters the pause branch above. Two stale-
+        // resolution guards:
+        //   - _audioSeekGen: bumped in showScreen() teardown and
+        //     playSong(), so a rejection from a torn-down session can't
+        //     touch new-session UI. Survives same-URL reloads.
+        //   - _playAttemptGen: bumped on every play branch entry, so
+        //     within a single session a slow rejection from attempt N
+        //     can't clobber a faster attempt N+1 (Play → Pause → Play).
+        const sessionGen = _audioSeekGen;
+        const attempt = ++_playAttemptGen;
+        isPlaying = true;
+        setPlayButtonState(true);
+        try {
+            await audio.play();
+        } catch (err) {
+            if (sessionGen !== _audioSeekGen) return;
+            if (attempt !== _playAttemptGen) return;
+            console.error('[app] audio.play() rejected:', err);
+            isPlaying = false;
+            setPlayButtonState(false);
+        }
     }
 }
 
@@ -4552,9 +4662,14 @@ function setSpeed(v) {
     }
     if (window._juceMode) {
         window.jucePlayer?.setRate(rate);
+        const juceAudio = window.slopsmithDesktop?.audio;
         Promise.resolve()
-            .then(() => window.slopsmithDesktop?.audio?.setBackingSpeed(rate))
-            .catch(err => console.warn('[setSpeed] setBackingSpeed failed:', err));
+            .then(() => juceAudio?.setBackingSpeed(rate))
+            // Match the HTML5 path: preserve pitch on the JUCE backing track too.
+            // Optional-chained call is a no-op on desktop builds that predate
+            // setBackingPreservePitch, so this is safe to ship unconditionally.
+            .then(() => juceAudio?.setBackingPreservePitch?.(true))
+            .catch(err => console.warn('[setSpeed] backing speed/preserve-pitch failed:', err));
     } else {
         audio.playbackRate = rate;
     }
@@ -5409,7 +5524,7 @@ async function startCountIn() {
                     _countingIn = false;
                     if (isPlaying) {
                         isPlaying = false;
-                        document.getElementById('btn-play').textContent = '▶ Play';
+                        setPlayButtonState(false);
                         if (window.slopsmith) {
                             window.slopsmith.isPlaying = false;
                             window.slopsmith.emit('song:pause', _songEventPayload());
@@ -5448,14 +5563,23 @@ async function startCountIn() {
                         if (gen !== _countInGen) return; // teardown during play start
                         if (!started) return;
                         isPlaying = true;
-                        document.getElementById('btn-play').textContent = '⏸ Pause';
+                        setPlayButtonState(true);
                         window.slopsmith.isPlaying = true;
                         window.slopsmith.emit('song:play', _songEventPayload());
                     }).catch((err) => console.error('[app] jucePlayer.play error:', err));
                 } else {
-                    audio.play();
-                    isPlaying = true;
-                    document.getElementById('btn-play').textContent = '⏸ Pause';
+                    audio.play().then(() => {
+                        if (gen !== _countInGen) return;
+                        isPlaying = true;
+                        setPlayButtonState(true);
+                    }).catch((err) => {
+                        if (gen !== _countInGen) return;
+                        // Same rationale as togglePlay: don't claim playback
+                        // started if the Promise rejected.
+                        console.error('[app] audio.play() rejected after count-in:', err);
+                        isPlaying = false;
+                        setPlayButtonState(false);
+                    });
                 }
                 return;
             }
@@ -5476,7 +5600,7 @@ setInterval(() => {
         // JUCE end-of-track: HTML5 fires 'ended'; JUCE needs a manual check
         if (window._juceMode && isPlaying && ct >= dur) {
             isPlaying = false;
-            document.getElementById('btn-play').textContent = '▶ Play';
+            setPlayButtonState(false);
             window.slopsmith.isPlaying = false;
             window.slopsmith.emit('song:ended', _songEventPayload());
             jucePlayer.pause().catch((err) => console.warn('[app] end-of-track pause error:', err));

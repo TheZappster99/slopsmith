@@ -25,6 +25,7 @@ log = logging.getLogger("slopsmith.lib.sloppak")
 
 import yaml
 
+from safepath import safe_join
 from song import (
     Song,
     Beat,
@@ -52,12 +53,38 @@ _source_lock = threading.Lock()
 
 
 def _unpack_zip(zip_path: Path, dest: Path) -> None:
-    """Extract a sloppak zip archive into dest, replacing any previous contents."""
+    """Extract a sloppak zip archive into dest, replacing any previous contents.
+
+    Members whose names escape ``dest`` via ``..`` segments, absolute paths, or
+    Windows-style separators are skipped with a warning so a crafted sloppak
+    can't write outside the unpack cache (zip-slip).
+    """
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest.resolve()
     with zipfile.ZipFile(str(zip_path), "r") as zf:
-        zf.extractall(str(dest))
+        for member in zf.infolist():
+            target = safe_join(dest_resolved, member.filename)
+            if target is None:
+                log.warning("sloppak: rejected unsafe zip member %r", member.filename)
+                continue
+            # A contained-but-degenerate name (e.g. "." or "subdir/..") would
+            # resolve back to the unpack root itself; opening that path for
+            # write is meaningless and would mask a real bug, so skip it.
+            if target == dest_resolved:
+                log.warning("sloppak: rejected zip member resolving to unpack root %r", member.filename)
+                continue
+            try:
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as e:
+                log.warning("sloppak: failed to extract zip member %r: %s", member.filename, e)
+                continue
 
 
 def _safe_id(filename: str) -> str:
@@ -259,15 +286,72 @@ def load_song(
                     log.warning("sloppak: drum_tab %r failed validation: %s",
                                 drum_tab_rel, reason)
 
-    # Optional shared lyrics file.
+    # Optional shared lyrics file. Same safety posture as the drum_tab
+    # loader above: constrain the manifest-declared path to source_dir
+    # (a crafted sloppak with `lyrics: ../../etc/passwd.json` would
+    # otherwise read arbitrary files), and ignore the payload unless
+    # it's the documented shape — a flat list of syllable dicts.
+    # Anything else (a dict at the root, a string, malformed entries)
+    # leaves `song.lyrics` empty rather than streaming surprise data
+    # downstream through the WS path.
     lyrics_rel = manifest.get("lyrics")
-    if lyrics_rel:
-        lyr_path = source_dir / str(lyrics_rel)
-        if lyr_path.exists():
+    if isinstance(lyrics_rel, str) and lyrics_rel:
+        try:
+            lyr_path = (source_dir / lyrics_rel).resolve()
+            lyr_path.relative_to(source_dir.resolve())
+        except ValueError:
+            log.warning("sloppak: lyrics path %r escapes source_dir — skipped", lyrics_rel)
+            lyr_path = None
+        except OSError as e:
+            log.warning("sloppak: lyrics path resolution failed (%s) — skipped", e)
+            lyr_path = None
+        if lyr_path is not None and lyr_path.exists():
             try:
-                song.lyrics = json.loads(lyr_path.read_text(encoding="utf-8"))
+                raw = json.loads(lyr_path.read_text(encoding="utf-8"))
             except Exception as e:
                 log.debug("sloppak: failed to parse lyrics %r: %s", lyrics_rel, e)
+                raw = None
+            if isinstance(raw, list):
+                # Filter to entries that at least look like syllables —
+                # presence of all three required keys with the right
+                # primitive types. Drops anything weird without poisoning
+                # the whole list.
+                song.lyrics = [
+                    e for e in raw
+                    if isinstance(e, dict)
+                    and isinstance(e.get("w"), str)
+                    and isinstance(e.get("t"), (int, float))
+                    and isinstance(e.get("d"), (int, float))
+                ]
+                if song.lyrics:
+                    # Provenance — populated by the converter (xml/sng),
+                    # the WhisperX fallback (whisperx), or hand-edits
+                    # (user). Validate against the closed enum so a
+                    # hand-edited (or otherwise malformed) manifest can't
+                    # propagate a YAML dict / list / arbitrary string
+                    # into the highway WS `lyrics.source` field and out
+                    # to plugin badges. Anything outside the enum (or
+                    # the wrong type) falls back to "xml" — the spec's
+                    # back-compat default — instead of being stringified
+                    # and trusted.
+                    _ALLOWED_LYRICS_SOURCES = {"xml", "sng", "whisperx", "user"}
+                    raw_source = manifest.get("lyrics_source")
+                    if isinstance(raw_source, str) and raw_source in _ALLOWED_LYRICS_SOURCES:
+                        song.lyrics_source = raw_source
+                    else:
+                        if raw_source is not None and (
+                            not isinstance(raw_source, str)
+                            or raw_source not in _ALLOWED_LYRICS_SOURCES
+                        ):
+                            log.warning(
+                                "sloppak: ignoring invalid lyrics_source %r — "
+                                "must be one of %s; falling back to 'xml'",
+                                raw_source, sorted(_ALLOWED_LYRICS_SOURCES),
+                            )
+                        song.lyrics_source = "xml"
+            elif raw is not None:
+                log.warning("sloppak: lyrics %r ignored — expected list, got %s",
+                            lyrics_rel, type(raw).__name__)
 
     # Stem descriptors — normalized for callers. File paths are resolved but
     # returned as ``file`` relative strings so URL construction stays caller-side.
