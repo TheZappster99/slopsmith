@@ -501,6 +501,15 @@ class MetadataDB:
             if naming_mode == "smart":
                 clauses = []
                 for arr_type in arr_has:
+                    # For Lead, also match legacy raw name 'Combo' in the NULL-smart_name
+                    # branch — _ensure_smart_names() maps name='Combo' → smart_name='Lead'
+                    # via the name-based fallback, so unscanned rows must be treated the same.
+                    extra_null = (
+                        " OR json_extract(value, '$.name') = ?"
+                        " OR json_extract(value, '$.name') LIKE ?"
+                        " OR json_extract(value, '$.name') LIKE ?"
+                    ) if arr_type == "Lead" else ""
+                    extra_null_params = ["Combo", "Alt. Combo%", "Bonus Combo%"] if arr_type == "Lead" else []
                     clauses.append(
                         "(json_extract(value, '$.smart_name') IS NOT NULL AND ("
                         f"json_extract(value, '$.smart_name') = ? OR "
@@ -510,7 +519,7 @@ class MetadataDB:
                         "json_extract(value, '$.smart_name') IS NULL AND ("
                         "json_extract(value, '$.name') = ? OR "
                         "json_extract(value, '$.name') LIKE ? OR "
-                        "json_extract(value, '$.name') LIKE ?))"
+                        f"json_extract(value, '$.name') LIKE ?{extra_null}))"
                     )
                     params += [
                         arr_type,
@@ -519,7 +528,7 @@ class MetadataDB:
                         arr_type,
                         f"Alt. {arr_type}%",
                         f"Bonus {arr_type}%",
-                    ]
+                    ] + extra_null_params
                 where += (
                     " AND EXISTS (SELECT 1 FROM json_each(songs.arrangements) WHERE "
                     + " OR ".join(f"({c})" for c in clauses)
@@ -535,6 +544,12 @@ class MetadataDB:
             if naming_mode == "smart":
                 clauses = []
                 for arr_type in arr_lacks:
+                    extra_null = (
+                        " OR json_extract(value, '$.name') = ?"
+                        " OR json_extract(value, '$.name') LIKE ?"
+                        " OR json_extract(value, '$.name') LIKE ?"
+                    ) if arr_type == "Lead" else ""
+                    extra_null_params = ["Combo", "Alt. Combo%", "Bonus Combo%"] if arr_type == "Lead" else []
                     clauses.append(
                         "(json_extract(value, '$.smart_name') IS NOT NULL AND ("
                         f"json_extract(value, '$.smart_name') = ? OR "
@@ -544,7 +559,7 @@ class MetadataDB:
                         "json_extract(value, '$.smart_name') IS NULL AND ("
                         "json_extract(value, '$.name') = ? OR "
                         "json_extract(value, '$.name') LIKE ? OR "
-                        "json_extract(value, '$.name') LIKE ?))"
+                        f"json_extract(value, '$.name') LIKE ?{extra_null}))"
                     )
                     params += [
                         arr_type,
@@ -553,7 +568,7 @@ class MetadataDB:
                         arr_type,
                         f"Alt. {arr_type}%",
                         f"Bonus {arr_type}%",
-                    ]
+                    ] + extra_null_params
                 where += (
                     " AND NOT EXISTS (SELECT 1 FROM json_each(songs.arrangements) WHERE "
                     + " OR ".join(f"({c})" for c in clauses)

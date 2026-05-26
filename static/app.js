@@ -1306,6 +1306,26 @@ function _getArrangementNamingMode() {
         return 'smart';
     }
 }
+// In smart mode 'Combo' is subsumed into 'Lead' (_ensure_smart_names maps it
+// the same way). Normalize any persisted 'Combo' tokens before querying or
+// rendering so the UI and the server stay in sync.
+function _toSmartArrs(arr) {
+    return arr.map(a => a === 'Combo' ? 'Lead' : a);
+}
+function _onNamingModeChange(value) {
+    try { localStorage.setItem('arrangementNamingMode', value); } catch (_) {}
+    if (value === 'smart') {
+        _libFilters.arrHas   = _toSmartArrs(_libFilters.arrHas);
+        _libFilters.arrLacks = _toSmartArrs(_libFilters.arrLacks);
+        _saveLibFilters();
+    }
+    _renderLibFilterDrawer();
+    _renderLibFilterChips();
+    _libEpoch++;
+    currentPage = 0;
+    _treeStats = null;
+    loadLibrary(0);
+}
 function _getArrangements() {
     return _getArrangementNamingMode() === 'smart'
         ? ['Lead', 'Rhythm', 'Bass']
@@ -1372,7 +1392,13 @@ function _loadLibFilters() {
     try {
         const raw = localStorage.getItem(_LIB_FILTERS_KEY);
         if (!raw) return _defaultLibFilters();
-        return _normalizeLibFilters(JSON.parse(raw));
+        const filters = _normalizeLibFilters(JSON.parse(raw));
+        // Normalize any stale 'Combo' tokens left from legacy-mode sessions.
+        if (_getArrangementNamingMode() === 'smart') {
+            filters.arrHas   = _toSmartArrs(filters.arrHas);
+            filters.arrLacks = _toSmartArrs(filters.arrLacks);
+        }
+        return filters;
     } catch {
         return _defaultLibFilters();
     }
@@ -1395,9 +1421,12 @@ function _libActiveCount() {
 }
 
 function _applyLibFiltersToParams(params) {
-    params.set('naming_mode', _getArrangementNamingMode());
-    if (_libFilters.arrHas.length) params.set('arrangements_has', _libFilters.arrHas.join(','));
-    if (_libFilters.arrLacks.length) params.set('arrangements_lacks', _libFilters.arrLacks.join(','));
+    const nm = _getArrangementNamingMode();
+    params.set('naming_mode', nm);
+    const arrHas   = nm === 'smart' ? _toSmartArrs(_libFilters.arrHas)   : _libFilters.arrHas;
+    const arrLacks = nm === 'smart' ? _toSmartArrs(_libFilters.arrLacks) : _libFilters.arrLacks;
+    if (arrHas.length)   params.set('arrangements_has',   arrHas.join(','));
+    if (arrLacks.length) params.set('arrangements_lacks', arrLacks.join(','));
     if (_libFilters.stemsHas.length) params.set('stems_has', _libFilters.stemsHas.join(','));
     if (_libFilters.stemsLacks.length) params.set('stems_lacks', _libFilters.stemsLacks.join(','));
     if (_libFilters.lyrics !== null) params.set('has_lyrics', String(_libFilters.lyrics));
