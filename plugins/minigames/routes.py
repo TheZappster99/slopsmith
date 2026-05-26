@@ -75,6 +75,11 @@ def _get_conn():
         raise RuntimeError("minigames plugin not initialised")
     conn = sqlite3.connect(db_path, timeout=5)
     conn.row_factory = sqlite3.Row
+    # WAL mode: reduces read/write contention under concurrent access (same
+    # practice as MetadataDB in server.py). busy_timeout is set via the
+    # connect() timeout= arg above (5 s), which maps to PRAGMA busy_timeout
+    # in Python's sqlite3 module when the connection opens.
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -206,6 +211,7 @@ def _list_minigame_plugins(force_refresh: bool = False) -> list:
     if not resolver:
         return []
     out = []
+    seen_ids: set = set()
     for pdir in resolver():
         manifest_path = pdir / "plugin.json"
         if not manifest_path.exists():
@@ -228,11 +234,18 @@ def _list_minigame_plugins(force_refresh: bool = False) -> list:
             continue
         # Spread spec first so authoritative top-level fields (plugin_id,
         # version) win if the minigame block contains conflicting keys.
-        out.append({
+        entry = {
             **spec,
             "plugin_id": plugin_id,
             "version":   data.get("version"),
-        })
+        }
+        # Deduplicate by plugin_id: first entry wins (resolver returns
+        # SLOPSMITH_PLUGINS_DIR before the bundled siblings, so an explicit
+        # override takes precedence over the in-tree snapshot — same winner
+        # selection as the core plugin loader).
+        if plugin_id not in seen_ids:
+            seen_ids.add(plugin_id)
+            out.append(entry)
     _registry_cache["ts"]   = time.monotonic()
     _registry_cache["data"] = out
     return list(out)
