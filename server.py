@@ -1733,8 +1733,28 @@ def _get_startup_status():
         return dict(_startup_status)
 
 
+def _relpath(f: Path, dlc: Path) -> str:
+    # Store the path relative to the DLC root so sub-folders (e.g.
+    # dlc/sloppak/foo.sloppak produced by the converter) resolve back
+    # correctly later. PSARCs always live directly in dlc/, so this
+    # reduces to f.name for them.
+    try:
+        return f.relative_to(dlc).as_posix()
+    except ValueError:
+        return f.name
+
+
+def _scan_one(item):
+    # Top-level so ProcessPoolExecutor can pickle it. dlc is passed
+    # through the tuple rather than captured from a closure.
+    f, mtime, size, dlc = item
+    log.debug("scanning %s", f.name)
+    meta = _extract_meta_for_file(f)
+    return _relpath(f, dlc), mtime, size, meta
+
+
 def _background_scan():
-    """Scan all PSARCs and cache metadata on startup. Uses thread pool for parallelism.
+    """Scan all PSARCs and cache metadata on startup. Uses process pool to bypass the GIL for CPU-bound AES decryption.
 
     Never sets `_scan_status["running"] = False` — ownership of that flag
     lives in `_scan_runner` so a `_kick_scan()` racing this function's
@@ -1816,17 +1836,7 @@ def _background_scan():
     log.info("Scan: listed %d PSARCs, %d sloppaks and %d loose folders in %s",
              len(psarcs), len(sloppaks), len(loose_songs), dlc)
 
-    def _rel(f: Path) -> str:
-        # Store the path relative to the DLC root so sub-folders (e.g.
-        # dlc/sloppak/foo.sloppak produced by the converter) resolve back
-        # correctly later. PSARCs always live directly in dlc/, so this
-        # reduces to f.name for them.
-        try:
-            return f.relative_to(dlc).as_posix()
-        except ValueError:
-            return f.name
-
-    current_files = {_rel(f) for f in all_songs}
+    current_files = {_relpath(f, dlc) for f in all_songs}
 
     # Clean up stale DB entries
     stale = meta_db.delete_missing(current_files)
@@ -1845,7 +1855,7 @@ def _background_scan():
         except OSError as e:
             log.debug("scan: skipping %s (%s)", f, e)
             continue
-        cache_key = _rel(f)
+        cache_key = _relpath(f, dlc)
         try:
             cached = meta_db.get(cache_key, mtime, size)
         except Exception as e:
@@ -1854,7 +1864,7 @@ def _background_scan():
             log.warning("scan cache lookup failed for %s: %s", cache_key, e)
             cached = None
         if not cached:
-            to_scan.append((f, mtime, size))
+            to_scan.append((f, mtime, size, dlc))
         elif cached.get("arrangements") and any(
             "smart_name" not in a for a in cached["arrangements"]
         ):
@@ -1866,7 +1876,7 @@ def _background_scan():
             # the arrangement (e.g. a name outside the recognised set with
             # zero path flags), so rescanning would produce the same null
             # forever and never converge.
-            to_scan.append((f, mtime, size))
+            to_scan.append((f, mtime, size, dlc))
 
     if not to_scan:
         _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "complete"}
@@ -1881,15 +1891,7 @@ def _background_scan():
     log.info("Library: %d PSARCs + %d sloppaks + %d loose folders, %d cached, %d to scan",
              len(psarcs), len(sloppaks), len(loose_songs), len(all_songs) - len(to_scan), len(to_scan))
 
-    def _scan_one(item):
-        f, mtime, size = item
-        # Per-file log so users running the server / desktop can see live
-        # activity and distinguish a stuck scan from a slow one.
-        log.debug("scanning %s", f.name)
-        meta = _extract_meta_for_file(f)
-        return _rel(f), mtime, size, meta
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(_scan_one, item): item[0].name for item in to_scan}
         for future in concurrent.futures.as_completed(futures):
             fname = futures[future]
