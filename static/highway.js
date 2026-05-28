@@ -2619,7 +2619,16 @@ function createHighway() {
                                     ? msg.arrangement_smart_name
                                     : msg.arrangement;
                                 document.getElementById('hud-arrangement').textContent = arrLabel;
-    
+
+                                // Full tuning notes display (e.g. "C# G# C# F# A# D#")
+                                const ctrlTuningNotes = document.getElementById('ctrl-tuning-notes');
+                                if (ctrlTuningNotes && msg.tuning_notes) {
+                                    ctrlTuningNotes.textContent = msg.tuning_notes;
+                                    let showNotes = false;
+                                    try { showNotes = localStorage.getItem('showTuningNotes') === 'true'; } catch (_) {}
+                                    ctrlTuningNotes.classList.toggle('hidden', !showNotes);
+                                }
+
                                 // Clear any lingering audio-error banner from a prior song.
                                 const existingAudioErr = document.getElementById('audio-error-banner');
                                 if (existingAudioErr) existingAudioErr.remove();

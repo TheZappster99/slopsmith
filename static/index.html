@@ -310,6 +310,14 @@
                             </select>
                         </div>
                         <div>
+                            <label class="flex items-center gap-3 cursor-pointer select-none">
+                                <input type="checkbox" id="setting-show-tuning-notes"
+                                    onchange="_onShowTuningNotesChange(this.checked)"
+                                    class="rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+                                <span class="text-sm text-gray-300">Show full tuning in player <span class="text-gray-500">(e.g. C# G# C# F# A# D# instead of Drop C)</span></span>
+                            </label>
+                        </div>
+                        <div>
                             <label for="setting-av-offset" class="text-sm font-medium text-gray-400 mb-2 block">
                                 A/V Sync Offset: <span id="setting-av-offset-val">0</span> ms
                             </label>
@@ -523,6 +531,7 @@
             <span class="text-gray-700 mx-1">|</span>
             <button onclick="setLoopStart()" id="btn-loop-a" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition" title="Set loop start at current time">A</button>
             <button onclick="setLoopEnd()" id="btn-loop-b" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition" title="Set loop end at current time">B</button>
+            <span id="ctrl-tuning-notes" class="text-xs text-gray-400 font-mono hidden"></span>
             <button onclick="saveCurrentLoop()" id="btn-loop-save" class="px-3 py-1.5 bg-dark-600 hover:bg-green-900/50 rounded-lg text-xs text-gray-300 transition hidden" title="Save this loop">Save</button>
             <button onclick="clearLoop()" id="btn-loop-clear" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition hidden" title="Clear loop">✕</button>
             <span id="loop-label" class="text-xs text-gray-600"></span>

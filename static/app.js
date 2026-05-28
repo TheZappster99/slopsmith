@@ -1320,6 +1320,11 @@ function _getArrangementNamingMode() {
 function _toSmartArrs(arr) {
     return arr.map(a => a === 'Combo' ? 'Lead' : a);
 }
+function _onShowTuningNotesChange(checked) {
+    try { localStorage.setItem('showTuningNotes', checked ? 'true' : 'false'); } catch (_) {}
+    const ctrlTuningNotes = document.getElementById('ctrl-tuning-notes');
+    if (ctrlTuningNotes) ctrlTuningNotes.classList.toggle('hidden', !checked);
+}
 function _onNamingModeChange(value) {
     const mode = value === 'legacy' ? 'legacy' : 'smart';
     _arrangementNamingMode = mode;
@@ -2471,6 +2476,13 @@ async function loadSettings() {
     document.getElementById('demucs-server-url').value = data.demucs_server_url || '';
     const leftyEl = document.getElementById('setting-lefty');
     if (leftyEl) leftyEl.checked = highway.getLefty();
+    const showTuningNotesEl = document.getElementById('setting-show-tuning-notes');
+    if (showTuningNotesEl) {
+        let v = false;
+        try { v = localStorage.getItem('showTuningNotes') === 'true'; } catch (_) {}
+        showTuningNotesEl.checked = v;
+        _onShowTuningNotesChange(v);
+    }
     // Restore master-difficulty slider from persisted value (defaults
     // to 100 when the key is absent — no behaviour change for users
     // who've never touched the slider).

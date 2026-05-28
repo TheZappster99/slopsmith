@@ -45,3 +45,27 @@ def tuning_name(offsets: list[int]) -> str:
         return named[tuple(offsets)]
 
     return " ".join(str(o) for o in offsets) or "Unknown"
+
+
+def tuning_notes(offsets: list[int], string_count: int | None = None) -> str:
+    """Return per-string open note names for display, e.g. 'C# G# C# F# A# D#'.
+
+    Converts raw semitone-offset arrays (as Rocksmith stores them) into the
+    actual pitch of each open string. `string_count` trims the output for
+    instruments with fewer strings (pass `arrangement_string_count(arr)` from
+    the server when available; defaults to len(offsets)).
+    """
+    NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    # Standard open string pitches as semitone from C (low → high)
+    GUITAR_BASE = [4, 9, 2, 7, 11, 4]  # E A D G B E
+    BASS_BASE   = [4, 9, 2, 7]          # E A D G
+
+    n = len(offsets)
+    sc = string_count if string_count is not None else n
+    base = BASS_BASE if sc <= 4 else GUITAR_BASE
+
+    notes = []
+    for i in range(min(sc, n)):
+        semitone = (base[i % len(base)] + offsets[i]) % 12
+        notes.append(NOTE_NAMES[semitone])
+    return " ".join(notes)

@@ -36,7 +36,7 @@ from song import (
     phrase_to_wire,
 )
 from audio import find_wem_files, convert_wem
-from tunings import tuning_name
+from tunings import tuning_name, tuning_notes
 import sloppak as sloppak_mod
 import drums as drums_mod
 import loosefolder as loosefolder_mod
@@ -4775,6 +4775,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1,
             "audio_url": audio_url,
             "audio_error": audio_error,
             "tuning": arr.tuning,
+            "tuning_notes": tuning_notes(arr.tuning, arrangement_string_count(arr)),
             # Number of strings on the active arrangement
             # (slopsmith-plugin-3dhighway#7). RS XML / PSARC sources
             # always emit `tuning` as length 6 with zero-padding for

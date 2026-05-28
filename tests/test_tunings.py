@@ -2,7 +2,7 @@
 
 import pytest
 
-from tunings import tuning_name
+from tunings import tuning_name, tuning_notes
 
 
 # ── Standard tunings (all six strings share the same offset) ─────────────────
@@ -132,3 +132,29 @@ def test_drop_pattern_takes_precedence_over_named_dict():
     # auto-generator fires first and produces the same string. The named dict entry
     # is effectively dead code for this case — this test documents the behavior.
     assert tuning_name([-2, 0, 0, 0, 0, 0]) == "Drop D"
+
+
+# ── tuning_notes: offset array → per-string note names ───────────────────────
+
+TUNING_NOTES_CASES = [
+    ([0, 0, 0, 0, 0, 0],         None, "E A D G B E"),
+    ([-1, -1, -1, -1, -1, -1],   None, "D# G# C# F# A# D#"),
+    ([-2, -2, -2, -2, -2, -2],   None, "D G C F A D"),
+    ([-3, -3, -3, -3, -3, -3],   None, "C# F# B E G# C#"),
+    ([-2, 0, 0, 0, 0, 0],        None, "D A D G B E"),
+    ([-4, -2, -2, -2, -2, -2],   None, "C G C F A D"),
+    ([-3, -1, -1, -1, -1, -1],   None, "C# G# C# F# A# D#"),
+    # 4-string bass: use BASS_BASE (E A D G)
+    ([0, 0, 0, 0, 0, 0],         4,    "E A D G"),
+    ([-2, 0, 0, 0, 0, 0],        4,    "D A D G"),
+]
+
+
+@pytest.mark.parametrize("offsets,sc,expected", TUNING_NOTES_CASES)
+def test_tuning_notes(offsets, sc, expected):
+    assert tuning_notes(offsets, sc) == expected
+
+
+def test_tuning_notes_default_string_count():
+    # Without string_count, uses len(offsets)
+    assert tuning_notes([0, 0, 0, 0]) == "E A D G"
