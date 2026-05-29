@@ -4593,6 +4593,22 @@ async function playSong(filename, arrangement) {
         ? _launchFrom.id : 'home';
     showScreen('player');
 
+    // Loading overlay — stays visible until highway.js receives 'ready'
+    {
+        const prev = document.getElementById('song-load-overlay');
+        if (prev) prev.remove();
+        const ol = document.createElement('div');
+        ol.id = 'song-load-overlay';
+        ol.className = 'fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-sm';
+        ol.innerHTML = `
+            <div class="bg-dark-700 border border-gray-700 rounded-2xl p-8 w-80 text-center shadow-2xl">
+                <div style="width:44px;height:44px;border:3px solid #374151;border-top-color:#4080e0;border-radius:50%;animation:spin 0.75s linear infinite;margin:0 auto 16px"></div>
+                <div class="text-sm text-gray-300 mb-4" id="song-load-stage">Opening...</div>
+                <div class="progress-bar"><div class="fill" id="song-load-bar" style="width:5%;transition:width 0.5s ease"></div></div>
+            </div>`;
+        document.body.appendChild(ol);
+    }
+
     // Wait for previous WebSocket to fully close before opening new one
     await new Promise(r => setTimeout(r, 500));
     highway.init(document.getElementById('highway'));
@@ -4752,6 +4768,10 @@ async function togglePlay() {
         audio.pause(); isPlaying = false;
         setPlayButtonState(false);
     } else {
+        // Guard: audio.src = '' normalises to window.location.href in
+        // browsers, causing a "not suitable" DOMException when play() is
+        // called while audio is still pending (deferred conversion).
+        if (!audio.src || audio.src === window.location.href) return;
         // Flip the UI optimistically before awaiting the play() Promise so
         // a quick second click during a slow start (buffering, device
         // wake, etc.) still enters the pause branch above. Two stale-

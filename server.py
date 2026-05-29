@@ -12,6 +12,15 @@ import shutil
 from pathlib import Path
 from typing import Any, ClassVar
 
+try:
+    import orjson as _orjson
+    def _json_encode(obj: Any) -> str:
+        return _orjson.dumps(obj).decode()
+except ImportError:
+    _orjson = None
+    def _json_encode(obj: Any) -> str:
+        return json.dumps(obj)
+
 from logging_setup import configure_logging
 configure_logging()
 
@@ -1624,7 +1633,7 @@ def _extract_meta_for_file(psarc_path: Path) -> dict:
     # Fallback: full extraction (handles SNG-only official DLC etc.)
     tmp = tempfile.mkdtemp(prefix="rs_scan_")
     try:
-        unpack_psarc(str(psarc_path), tmp)
+        unpack_psarc(str(psarc_path), tmp, patterns=["*.xml", "*.sng", "*.json"])
         song = load_song(tmp)
         tuning = "E Standard"
         tuning_offsets: list[int] = [0] * 6
@@ -4314,7 +4323,7 @@ async def get_song_art(filename: str):
     def _extract_art():
         tmp = tempfile.mkdtemp(prefix="rs_art_")
         try:
-            unpack_psarc(str(psarc_path), tmp)
+            unpack_psarc(str(psarc_path), tmp, patterns=["*.dds"])
             dds_files = sorted(Path(tmp).rglob("*.dds"), key=lambda p: p.stat().st_size, reverse=True)
             if not dds_files:
                 return None
@@ -4450,19 +4459,19 @@ def _get_or_extract(filename, psarc_path):
         cached = _extract_cache.get(filename)
         if cached:
             tmp, song, ts = cached
-            if Path(tmp).exists() and (time.time() - ts) < 300:  # 5 min cache
+            if Path(tmp).exists() and (time.time() - ts) < 3600:  # 1 hour cache
                 return tmp, song, False  # False = not new
             else:
                 shutil.rmtree(tmp, ignore_errors=True)
                 del _extract_cache[filename]
 
     tmp = tempfile.mkdtemp(prefix="rs_web_")
-    unpack_psarc(str(psarc_path), tmp)
+    unpack_psarc(str(psarc_path), tmp, patterns=["*.xml", "*.sng", "*.json", "*.wem"])
     song = load_song(tmp)
 
     with _extract_cache_lock:
         # Clean old entries if cache gets too big
-        if len(_extract_cache) > 10:
+        if len(_extract_cache) > 50:
             oldest = min(_extract_cache, key=lambda k: _extract_cache[k][2])
             old_tmp = _extract_cache.pop(oldest)[0]
             shutil.rmtree(old_tmp, ignore_errors=True)
@@ -4694,8 +4703,12 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1,
             except Exception:
                 log.debug("audio cache eviction failed for %s", AUDIO_CACHE_DIR, exc_info=True)
 
+        # Audio conversion runs as a background task so chart data can stream
+        # immediately. The result is sent as a deferred `audio_url` message
+        # after `ready`. Cache hits skip this path entirely.
+        _audio_task: asyncio.Task | None = None
+
         if not audio_url and is_loose:
-            await websocket.send_json({"type": "loading", "stage": "Converting audio..."})
             wem_path = loosefolder_mod.find_audio(psarc_path)
             if wem_path:
                 # Re-resolve to defeat a symlinked audio.wem that points
@@ -4715,40 +4728,57 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1,
                     # would otherwise race writing the same file and
                     # one could serve a partial mp3/wav.
                     tmp_suffix = uuid.uuid4().hex[:8]
-                    tmp_base = AUDIO_CACHE_DIR / f"audio_{audio_id}.{tmp_suffix}"
-                    try:
-                        produced = convert_wem(str(wem_resolved), str(tmp_base))
-                        ext = Path(produced).suffix
-                        final_path = AUDIO_CACHE_DIR / f"audio_{audio_id}{ext}"
-                        os.replace(produced, final_path)
-                        audio_url = f"/audio/audio_{audio_id}{ext}"
-                    except Exception as e:
-                        log.exception("loose-folder audio conversion failed for %s", audio_id)
-                        audio_error = f"Audio conversion failed: {e}"
-                        # Best-effort cleanup of partial temp artifacts.
-                        for stale in AUDIO_CACHE_DIR.glob(f"audio_{audio_id}.{tmp_suffix}.*"):
-                            stale.unlink(missing_ok=True)
+                    _wem_src = str(wem_resolved)
+                    _tmp_base = str(AUDIO_CACHE_DIR / f"audio_{audio_id}.{tmp_suffix}")
+                    _aid = audio_id
+                    _tsuf = tmp_suffix
+
+                    async def _convert_loose(
+                        ws=_wem_src, tb=_tmp_base, aid=_aid, tsuf=_tsuf
+                    ):
+                        try:
+                            produced = await loop.run_in_executor(
+                                None, lambda: convert_wem(ws, tb)
+                            )
+                            ext = Path(produced).suffix
+                            final_path = AUDIO_CACHE_DIR / f"audio_{aid}{ext}"
+                            os.replace(produced, final_path)
+                            return f"/audio/audio_{aid}{ext}", None
+                        except Exception as exc:
+                            log.exception(
+                                "loose-folder audio conversion failed for %s", aid
+                            )
+                            for stale in AUDIO_CACHE_DIR.glob(f"audio_{aid}.{tsuf}.*"):
+                                stale.unlink(missing_ok=True)
+                            return None, f"Audio conversion failed: {exc}"
+
+                    _audio_task = asyncio.create_task(_convert_loose())
             else:
                 audio_error = "No audio file found in loose folder."
-            _evict_audio_cache()
 
         if not audio_url and not is_slop and not is_loose:
-            await websocket.send_json({"type": "loading", "stage": "Converting audio..."})
             wem_files = find_wem_files(tmp)
             if not wem_files:
                 audio_error = "No WEM audio files were found inside this PSARC."
             else:
-                try:
-                    audio_path = convert_wem(wem_files[0], os.path.join(tmp, "audio"))
-                    ext = Path(audio_path).suffix
-                    audio_dest = AUDIO_CACHE_DIR / f"audio_{audio_id}{ext}"
-                    shutil.copy2(audio_path, audio_dest)
-                    audio_url = f"/audio/audio_{audio_id}{ext}"
-                except Exception as e:
-                    log.exception("audio conversion failed for %s", audio_id)
-                    audio_error = f"Audio conversion failed: {e}"
+                _wem_src = wem_files[0]
+                _audio_base = os.path.join(tmp, "audio")
+                _aid = audio_id
 
-            _evict_audio_cache()
+                async def _convert_psarc(ws=_wem_src, ab=_audio_base, aid=_aid):
+                    try:
+                        audio_path = await loop.run_in_executor(
+                            None, lambda: convert_wem(ws, ab)
+                        )
+                        ext = Path(audio_path).suffix
+                        audio_dest = AUDIO_CACHE_DIR / f"audio_{aid}{ext}"
+                        shutil.copy2(audio_path, audio_dest)
+                        return f"/audio/audio_{aid}{ext}", None
+                    except Exception as exc:
+                        log.exception("audio conversion failed for %s", aid)
+                        return None, f"Audio conversion failed: {exc}"
+
+                _audio_task = asyncio.create_task(_convert_psarc())
 
         # Send song metadata
         arr_list = [
@@ -4776,6 +4806,9 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1,
             "arrangements": arr_list,
             "audio_url": audio_url,
             "audio_error": audio_error,
+            # True while audio is converting in the background; the frontend
+            # will receive a deferred `audio_url` message when it's ready.
+            "audio_pending": _audio_task is not None,
             "tuning": arr.tuning,
             "tuning_notes": tuning_notes(arr.tuning, arrangement_string_count(arr)),
             # Number of strings on the active arrangement
@@ -5153,32 +5186,41 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1,
                         "data": [],
                     })
 
-        # Send notes in chunks
-        notes = [note_to_wire(n) for n in arr.notes]
-        # Send in chunks of 500
-        for i in range(0, len(notes), 500):
-            await websocket.send_json({
+        # Memoize wire-format conversion on the arrangement object so repeated
+        # plays of a cached song skip the expensive Python dict construction.
+        # Concurrent first-play races are harmless — both produce identical
+        # values; last write wins without corrupting either.
+        if not hasattr(arr, '_notes_wire'):
+            arr._notes_wire = [note_to_wire(n) for n in arr.notes]
+            arr._chords_wire = [chord_to_wire(c) for c in arr.chords]
+            arr._hand_shapes_wire = [hand_shape_to_wire(h) for h in arr.hand_shapes]
+            arr._phrases_wire = [phrase_to_wire(p) for p in arr.phrases] if arr.phrases else None
+
+        notes_wire = arr._notes_wire
+        chords_wire = arr._chords_wire
+        hand_shapes_wire = arr._hand_shapes_wire
+        phrases_wire = arr._phrases_wire
+
+        for i in range(0, len(notes_wire), 2000):
+            await websocket.send_text(_json_encode({
                 "type": "notes",
-                "data": notes[i:i+500],
-                "total": len(notes),
-            })
+                "data": notes_wire[i:i+2000],
+                "total": len(notes_wire),
+            }))
 
-        # Send chords
-        chords = [chord_to_wire(c) for c in arr.chords]
-        for i in range(0, len(chords), 500):
-            await websocket.send_json({
+        for i in range(0, len(chords_wire), 2000):
+            await websocket.send_text(_json_encode({
                 "type": "chords",
-                "data": chords[i:i+500],
-                "total": len(chords),
-            })
+                "data": chords_wire[i:i+2000],
+                "total": len(chords_wire),
+            }))
 
-        hand_shapes_out = [hand_shape_to_wire(h) for h in arr.hand_shapes]
-        for i in range(0, len(hand_shapes_out), 500):
-            await websocket.send_json({
+        for i in range(0, len(hand_shapes_wire), 2000):
+            await websocket.send_text(_json_encode({
                 "type": "handshapes",
-                "data": hand_shapes_out[i:i+500],
-                "total": len(hand_shapes_out),
-            })
+                "data": hand_shapes_wire[i:i+2000],
+                "total": len(hand_shapes_wire),
+            }))
 
         # Per-phrase difficulty data for the master-difficulty slider
         # (slopsmith#48). Only sent when the source chart had multiple
@@ -5187,21 +5229,33 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1,
         # frontend treats the missing message as "slider disabled".
         # Consumers that don't know about this message type ignore it.
         #
-        # Chunked at phrase granularity (20 phrases per frame) because
-        # each phrase nests per-level note/chord lists — a single frame
-        # could otherwise exceed proxy/WS size limits on large songs.
-        # Chunk boundary is per-phrase (not per-level) so the frontend
-        # reassembles whole phrase ladders.
-        if arr.phrases:
-            total = len(arr.phrases)
-            for i in range(0, total, 20):
-                await websocket.send_json({
+        # Chunked at phrase granularity because each phrase nests per-level
+        # note/chord lists — a single frame could otherwise exceed proxy/WS
+        # size limits on very large songs. Chunk boundary is per-phrase (not
+        # per-level) so the frontend reassembles whole phrase ladders.
+        if phrases_wire:
+            total = len(phrases_wire)
+            for i in range(0, total, 100):
+                await websocket.send_text(_json_encode({
                     "type": "phrases",
-                    "data": [phrase_to_wire(p) for p in arr.phrases[i:i + 20]],
+                    "data": phrases_wire[i:i + 100],
                     "total": total,
-                })
+                }))
 
         await websocket.send_json({"type": "ready"})
+
+        # If audio was converting in the background, await it now and send the
+        # result. The highway is already rendering; audio attaches when ready.
+        if _audio_task is not None:
+            _deferred_url, _deferred_err = await _audio_task
+            _evict_audio_cache()
+            try:
+                if _deferred_url:
+                    await websocket.send_json({"type": "audio_url", "url": _deferred_url})
+                else:
+                    await websocket.send_json({"type": "audio_url", "error": _deferred_err or "Audio conversion failed."})
+            except Exception:
+                pass  # WebSocket closed before audio was ready
 
         # Keep connection alive for control messages
         try:

@@ -135,11 +135,19 @@ def read_psarc_entries(filepath: str, patterns: list[str] | None = None) -> dict
     return result
 
 
-def unpack_psarc(filepath: str, output_dir: str) -> list[str]:
+def unpack_psarc(
+    filepath: str,
+    output_dir: str,
+    patterns: list[str] | None = None,
+) -> list[str]:
     """Extract a PSARC archive. Returns list of extracted file paths.
 
     Entries whose TOC filename escapes ``output_dir`` via ``..`` segments,
     absolute paths, or Windows-style separators are skipped with a warning.
+
+    ``patterns`` is an optional list of glob patterns (case-insensitive).
+    When given, only matching entries are extracted — useful for skipping
+    album art, audio banks, and other assets that are not needed at runtime.
     """
     extracted = []
 
@@ -150,6 +158,10 @@ def unpack_psarc(filepath: str, output_dir: str) -> list[str]:
         for entry, filename in zip(entries[1:], filenames):
             filename = filename.strip()
             if not filename:
+                continue
+            if patterns is not None and not any(
+                fnmatch.fnmatch(filename.lower(), p.lower()) for p in patterns
+            ):
                 continue
             outpath = safe_join(out, filename)
             if outpath is None:

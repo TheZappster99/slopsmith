@@ -379,32 +379,14 @@ def convert_wem(wem_path: str, output_base: str) -> str:
     errors: list[str] = []
     resolution_notes: list[str] = []
 
-    # Try vgmstream-cli → WAV → MP3 (best browser compatibility).
+    # Try vgmstream-cli → WAV. WAV is served directly — all browsers support
+    # it with range requests, and skipping the ffmpeg MP3 transcode step saves
+    # 0.5–1s per song on a local server where file size doesn't matter.
     vgmstream = _vgmstream_cmd(resolution_notes=resolution_notes)
     if vgmstream:
         wav = output_base + ".wav"
         ok, detail = _decode_wem_to_wav(vgmstream, wem_path, wav)
         if ok:
-            ffmpeg = _ffmpeg_cmd()
-            if ffmpeg:
-                mp3 = output_base + ".mp3"
-                # Same OSError/timeout protection as the direct-fallback
-                # ffmpeg calls below — vgmstream decoded fine, but a
-                # wrong-arch / missing-loader ffmpeg would otherwise
-                # raise raw out of convert_wem instead of letting us
-                # fall back to returning the decoded WAV.
-                try:
-                    r2 = subprocess.run(
-                        [ffmpeg, "-y", "-i", wav, "-b:a", "192k", mp3],
-                        capture_output=True,
-                        timeout=120,
-                    )
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    log.warning("ffmpeg MP3-transcode launch failed (%s): %s", ffmpeg, exc)
-                    r2 = None
-                if r2 is not None and r2.returncode == 0 and os.path.exists(mp3):
-                    os.remove(wav)
-                    return mp3
             return wav
         errors.append(f"vgmstream: {detail}")
 

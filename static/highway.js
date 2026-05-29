@@ -116,6 +116,7 @@ function createHighway() {
     // "drums loaded but empty".
     let drumTab = null;  // { version, name, kit: [...], hits: [...] }
     let ready = false;
+    let _audioPending = false; // true while server is converting audio in background
     // Master-difficulty (slopsmith#48). _phrases stays null as a
     // "slider disabled" sentinel when the source chart has no ladder
     // data (GP imports, legacy sloppak) — the server omits the
@@ -2485,8 +2486,16 @@ function createHighway() {
             // connection so the app.js engine-reroute watcher isn't wedged.
             window._highwayJuceRoutingPending = false;
             ws = new WebSocket(wsUrl);
-            ws.onclose = () => { console.log('WS closed'); };
-            ws.onerror = (e) => { console.error('WS error', e); };
+            ws.onclose = () => {
+                console.log('WS closed');
+                const _ol = document.getElementById('song-load-overlay');
+                if (_ol) _ol.remove();
+            };
+            ws.onerror = (e) => {
+                console.error('WS error', e);
+                const _ol = document.getElementById('song-load-overlay');
+                if (_ol) _ol.remove();
+            };
             // Reset the serialization chain so old in-flight handlers
             // from a previous connection don't delay new messages.
             _msgChain = Promise.resolve();
@@ -2554,11 +2563,27 @@ function createHighway() {
                         return;
                     }
                     switch (msg.type) {
-                        case 'loading':
-                            console.log('Loading:', msg.stage);
+                        case 'loading': {
+                            const stageEl = document.getElementById('song-load-stage');
+                            if (stageEl) stageEl.textContent = msg.stage || 'Loading...';
+                            const bar = document.getElementById('song-load-bar');
+                            if (bar) {
+                                const s = (msg.stage || '').toLowerCase();
+                                bar.style.width = s.includes('extract') ? '20%'
+                                    : s.includes('convert') ? '40%'
+                                    : '30%';
+                            }
                             break;
+                        }
                         case 'song_info':
                             songInfo = msg;
+                            _audioPending = !!msg.audio_pending;
+                            {
+                                const _bar = document.getElementById('song-load-bar');
+                                if (_bar) _bar.style.width = '65%';
+                                const _st = document.getElementById('song-load-stage');
+                                if (_st) _st.textContent = 'Loading chart...';
+                            }
                             {
                                 const parsedOffset = Number(msg.offset);
                                 songOffset = Number.isFinite(parsedOffset) ? parsedOffset : 0.0;
@@ -2908,6 +2933,26 @@ function createHighway() {
                             break;
                         case 'ready':
                             ready = true;
+                            if (_audioPending) {
+                                // Audio is still converting — keep overlay up but
+                                // switch it to an "audio converting" state so the
+                                // user knows the highway is ready but audio isn't.
+                                const _st = document.getElementById('song-load-stage');
+                                if (_st) _st.textContent = 'Converting audio...';
+                                const _bar = document.getElementById('song-load-bar');
+                                if (_bar) {
+                                    _bar.style.transition = 'none';
+                                    _bar.style.width = '80%';
+                                    _bar.style.animation = 'pulse 1.5s ease-in-out infinite';
+                                }
+                            } else {
+                                const _bar = document.getElementById('song-load-bar');
+                                if (_bar) _bar.style.width = '100%';
+                                setTimeout(() => {
+                                    const _ol = document.getElementById('song-load-overlay');
+                                    if (_ol) _ol.remove();
+                                }, 180);
+                            }
                             if (handShapes.length) {
                                 handShapes.sort((a, b) => a.start_time - b.start_time);
                             }
@@ -2933,6 +2978,50 @@ function createHighway() {
                                 });
                             }
                             break;
+                        case 'audio_url': {
+                            // Deferred audio: server finished converting WEM after
+                            // the highway was already ready. Set up audio now.
+                            _audioPending = false;
+                            {
+                                const _bar = document.getElementById('song-load-bar');
+                                if (_bar) {
+                                    _bar.style.animation = '';
+                                    _bar.style.transition = 'width 0.5s ease';
+                                    _bar.style.width = '100%';
+                                }
+                                setTimeout(() => {
+                                    const _ol = document.getElementById('song-load-overlay');
+                                    if (_ol) _ol.remove();
+                                }, 180);
+                            }
+                            const audioEl = document.getElementById('audio');
+                            if (msg.error) {
+                                const existingBanner = document.getElementById('audio-error-banner');
+                                if (existingBanner) existingBanner.remove();
+                                const banner = document.createElement('div');
+                                banner.id = 'audio-error-banner';
+                                banner.className = 'fixed top-4 left-1/2 -translate-x-1/2 z-[300] bg-red-900/95 border border-red-700 text-red-100 rounded-lg px-4 py-3 max-w-2xl shadow-xl';
+                                banner.innerHTML = `<div class="flex items-start gap-3"><span class="text-xl leading-none">⚠</span><div class="flex-1"><div class="font-semibold text-sm">Audio unavailable</div><div class="text-xs text-red-200 mt-1"></div></div><button class="text-red-300 hover:text-white text-lg leading-none" aria-label="Dismiss">✕</button></div>`;
+                                banner.querySelector('.text-xs').textContent = msg.error;
+                                banner.querySelector('button').addEventListener('click', () => banner.remove());
+                                document.body.appendChild(banner);
+                            } else if (msg.url) {
+                                const isAudioUrl = msg.url.startsWith('/audio/');
+                                window._currentSongAudio = { url: msg.url, juceEligible: isAudioUrl };
+                                if (!window._juceMode) {
+                                    window._juceAudioUrl = null;
+                                    audioEl.src = msg.url;
+                                    if (typeof window.slopsmith?.audio?.applySongVolume === 'function') {
+                                        void window.slopsmith.audio.applySongVolume();
+                                    }
+                                    audioEl.load();
+                                    _showAudioBufferingOverlay(audioEl);
+                                }
+                                // JUCE users: app.js engine-reroute watcher picks up
+                                // window._currentSongAudio and calls loadBackingTrack.
+                            }
+                            break;
+                        }
                     }
                     } catch (err) {
                         console.error('[highway] ws.onmessage error:', err);
@@ -3155,6 +3244,7 @@ function createHighway() {
             // Close old WS but keep audio + animation running
             if (ws) { ws.close(); ws = null; }
             ready = false;
+            _audioPending = false;
             notes = []; chords = []; handShapes = []; beats = []; sections = []; anchors = []; chordTemplates = []; lyrics = []; lyricsSource = ""; toneChanges = []; toneBase = ""; drumTab = null;
             stringCount = 6;  // default until song_info arrives
             // Drop any per-song offset from the previous load so setTime
